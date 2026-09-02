@@ -1,7 +1,7 @@
 import { type Request, type Response } from 'express';
 import { cache } from '../cache.js';
 import { validateProjects } from '../../shared/schemas.js';
-import { getProjectsResponse as getCodexProjectsResponse } from '../codexParser.js';
+import { getCodexProjectsResponse } from '../codexResponseService.js';
 import { getProjectsResponse as getOpenClawProjectsResponse } from '../openclawParser.js';
 import { getProjectsResponse as getOpencodeProjectsResponse } from '../opencodeParser.js';
 import { getProjectsResponse as getClaudeProjectsResponse } from '../claudeJsonlParser.js';
@@ -28,7 +28,7 @@ export async function getProjects(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const data = fetchProjectsData(agent);
+    const data = await fetchProjectsData(agent);
     cache.set(cacheKey, data);
     res.json(data);
   } catch (error) {
@@ -41,7 +41,7 @@ export async function getProjects(req: Request, res: Response): Promise<void> {
   }
 }
 
-function fetchProjectsData(agent: string) {
+async function fetchProjectsData(agent: string) {
   if (agent === 'codex') {
     return getCodexProjectsResponse();
   } else if (agent === 'openclaw') {
@@ -58,6 +58,6 @@ function fetchProjectsData(agent: string) {
 
 function refreshProjectsCache(agent: string, cacheKey: string): void {
   Promise.resolve()
-    .then(() => { const data = fetchProjectsData(agent); cache.set(cacheKey, data); })
+    .then(async () => { const data = await fetchProjectsData(agent); cache.set(cacheKey, data); })
     .catch(err => console.error('Background refresh failed (projects):', err));
 }

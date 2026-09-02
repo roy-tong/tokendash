@@ -2,7 +2,7 @@ import { type Request, type Response } from 'express';
 import { cache } from '../cache.js';
 import { validateBlocks } from '../../shared/schemas.js';
 import { type BlockGranularity } from '../claudeJsonlParser.js';
-import { getBlocksResponse as getCodexBlocksResponse } from '../codexParser.js';
+import { getCodexBlocksResponse } from '../codexResponseService.js';
 import { getBlocksResponse as getOpenClawBlocksResponse } from '../openclawParser.js';
 import { getBlocksResponse as getOpencodeBlocksResponse } from '../opencodeParser.js';
 import { getBlocksResponse as getClaudeBlocksResponse } from '../claudeJsonlParser.js';
@@ -36,7 +36,7 @@ export async function getBlocks(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const data = fetchBlocksData(agent, project, granularity);
+    const data = await fetchBlocksData(agent, project, granularity);
     cache.set(cacheKey, data);
     res.json(data);
   } catch (error) {
@@ -49,13 +49,13 @@ export async function getBlocks(req: Request, res: Response): Promise<void> {
   }
 }
 
-function fetchBlocksData(agent: string, project: string | undefined, granularity: BlockGranularity) {
+async function fetchBlocksData(agent: string, project: string | undefined, granularity: BlockGranularity) {
   if (agent === 'openclaw') {
     return validateBlocks(getOpenClawBlocksResponse({ project: project || null, granularity }));
   } else if (agent === 'opencode') {
     return validateBlocks(getOpencodeBlocksResponse({ project: project || null, granularity }));
   } else if (agent === 'codex') {
-    return validateBlocks(getCodexBlocksResponse({ project: project || null, granularity }));
+    return validateBlocks(await getCodexBlocksResponse({ project: project || null, granularity }));
   } else if (agent === 'pi') {
     return validateBlocks(getPiBlocksResponse({ project: project || null, granularity }));
   } else {
@@ -71,6 +71,6 @@ function refreshBlocksCache(
   granularity: BlockGranularity,
 ): void {
   Promise.resolve()
-    .then(() => { const data = fetchBlocksData(agent, project, granularity); cache.set(cacheKey, data); })
+    .then(async () => { const data = await fetchBlocksData(agent, project, granularity); cache.set(cacheKey, data); })
     .catch(err => console.error('Background refresh failed (blocks):', err));
 }
