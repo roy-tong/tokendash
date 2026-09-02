@@ -229,6 +229,64 @@ final class BadgeUpdaterModeTests: XCTestCase {
         XCTAssertEqual(SettingsStore.RefreshInterval.oneHour.label, "1 hour (Low Power)")
         XCTAssertNil(SettingsStore.RefreshInterval(rawValue: 30), "legacy badge cadence should fall back to the one-hour default")
     }
+
+    // MARK: - hourly range granularity
+
+    func testFullUpdateRequestsGranularityMatchingRange() async throws {
+        let state = AppState()
+        let mock = MockAPIClient()
+        let updater = BadgeUpdater(state: state, client: mock)
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        SettingsStore.shared.hourlyRange = .threeHours
+        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
+        let granularity = await mock.lastBlocksGranularity
+        XCTAssertEqual(granularity, .fifteenMin, "3H 档位必须请求 15m 粒度")
+
+        SettingsStore.shared.hourlyRange = .oneHour
+        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
+        let granularity2 = await mock.lastBlocksGranularity
+        XCTAssertEqual(granularity2, .fiveMin, "1H 档位必须请求 5m 粒度")
+    }
+
+    func testRangeChangeTriggersCacheServedRefetch() async throws {
+        let state = AppState()
+        let mock = MockAPIClient()
+        let updater = BadgeUpdater(state: state, client: mock)
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
+        let counts = await mock.snapshot()
+
+        updater.refetchDetailForRangeChange()
+        try await waitUntil { await mock.snapshot().blocks > counts.blocks }
+
+        let lastDailyRefresh = await mock.lastDailyRefresh
+        XCTAssertEqual(lastDailyRefresh, false, "档位切换重拉走缓存（refresh=false），不强扫 JSONL")
+    }
+
+    func testFineGrainedRangeTightensPopoverThrottleToFiveMinutes() async throws {
+        let state = AppState()
+        let mock = MockAPIClient()
+        var now = Date(timeIntervalSinceReferenceDate: 1_000)
+        let updater = BadgeUpdater(
+            state: state, client: mock, now: { now }, popoverRefreshInterval: 30 * 60
+        )
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        await updater.performFullUpdate(forceRefresh: true, forceQuota: false)
+        let countsAfterFirst = await mock.snapshot().daily
+
+        now.addTimeInterval(6 * 60)   // 6min：30min 节流内、5min 节流外
+        SettingsStore.shared.hourlyRange = .oneHour
+        let refreshed = await updater.refreshOnPopoverOpenIfNeeded()
+        XCTAssertTrue(refreshed, "1H 档位下 popover 打开的节流必须收紧到 5min")
+        let countsAfterOpen = await mock.snapshot().daily
+        XCTAssertGreaterThan(countsAfterOpen, countsAfterFirst)
+    }
 }
 
 /// 计数型 mock — 记录每个端点被调用的次数与关键参数，供模式断言。

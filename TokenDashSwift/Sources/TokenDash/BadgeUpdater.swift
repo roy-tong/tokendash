@@ -162,6 +162,14 @@ import AppKit
         }
     }
 
+    /// Range changed (Settings picker or chart tabs) — refetch detail with the
+    /// new granularity. Cache-served: the daemon's response cache makes repeat
+    /// toggles cheap; a cold key triggers one parse server-side.
+    func refetchDetailForRangeChange() {
+        guard mode != .suspended else { return }
+        Task { await self.performFullUpdate(forceRefresh: false, forceQuota: false) }
+    }
+
     /// Manual refresh (refresh button) — force everything, including external quota.
     func refreshNow() {
         Task {
@@ -190,8 +198,11 @@ import AppKit
             return false
         }
         let currentTime = now()
+        let throttle: TimeInterval = SettingsStore.shared.hourlyRange == .today
+            ? popoverRefreshInterval
+            : min(popoverRefreshInterval, 5 * 60)
         if let lastUpdatedAt = state.lastUpdatedAt,
-           currentTime.timeIntervalSince(lastUpdatedAt) < popoverRefreshInterval {
+           currentTime.timeIntervalSince(lastUpdatedAt) < throttle {
             return false
         }
         await performFullUpdate(forceRefresh: true, forceQuota: false)
@@ -271,11 +282,12 @@ import AppKit
             var blockResults: [BlocksResponse] = []
             var projectResults: [ProjectsResponse] = []
 
+            let granularity = Self.blocksGranularity(for: SettingsStore.shared.hourlyRange)
             for agent in agents {
                 // A forced refresh uses fresh daemon data; launch and cached
                 // detail paths can reuse the daemon's existing results.
                 if let d = try? await api.getDaily(agent: agent, refresh: forceRefresh) { dailyResults.append(d) }
-                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: .hour) { blockResults.append(b) }
+                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: granularity) { blockResults.append(b) }
                 if let p = try? await api.getProjects(agent: agent, refresh: forceRefresh) { projectResults.append(p) }
             }
 
@@ -303,7 +315,7 @@ import AppKit
                     totalTokens: totalTokens, inputTokens: totalInput, outputTokens: totalOutput,
                     date: today, at: Date())
             }
-            let computedBuckets = computeBuckets(blocks: blockResults, today: today)
+            let (computedBuckets, granularityMatched) = computeBuckets(blocks: blockResults)
             let computedProjects = computeProjects(projects: projectResults, today: today)
             // Stale-while-revalidate fallback: if this fetch came back without
             // today data (e.g. daemon warm-up still running), keep the previous
@@ -325,6 +337,9 @@ import AppKit
             self.state.todaySummary = summary
             self.state.cacheRate = cacheRate
             self.state.errorMessage = nil
+            if !granularityMatched {
+                NSLog("[TokenDash] blocks granularity mismatch — fell back to Today view")
+            }
             self.state.hourlyData = hourly
             self.state.projects = projectRows
             self.state.models = modelRows
@@ -490,8 +505,24 @@ import AppKit
 
     // MARK: - Data computation
 
-    private func computeBuckets(blocks: [BlocksResponse], today: String) -> [TimeBucket] {
-        UsageBucketAggregator.aggregate(blocks, range: SettingsStore.shared.hourlyRange, now: Date()).buckets
+    /// Blocks API granularity that matches the selected hourly range.
+    static func blocksGranularity(for range: SettingsStore.HourlyRange) -> BlocksGranularity {
+        switch range {
+        case .today: return .hour
+        case .threeHours: return .fifteenMin
+        case .oneHour: return .fiveMin
+        }
+    }
+
+    private func computeBuckets(blocks: [BlocksResponse]) -> (buckets: [TimeBucket], matched: Bool) {
+        let range = SettingsStore.shared.hourlyRange
+        let result = UsageBucketAggregator.aggregate(blocks, range: range, now: Date())
+        guard result.granularityMatched || range == .today else {
+            // Legacy daemon ignored granularity — fall back to the Today view.
+            let fallback = UsageBucketAggregator.aggregate(blocks, range: .today, now: Date())
+            return (fallback.buckets, false)
+        }
+        return (result.buckets, result.granularityMatched)
     }
 
     private func computeProjects(projects: [ProjectsResponse], today: String) -> [ProjectRow] {
