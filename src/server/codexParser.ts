@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { DailyEntry, DailyResponse, ProjectsResponse, BlockEntry, BlocksResponse, ModelBreakdown } from '../shared/types.js';
 import { calculateCost, isLongContextCodexRequest, normalizeCodexModelName } from './codexPricing.js';
+import { type BlockGranularity } from './claudeJsonlParser.js';
 import { buildUsageFileIndex } from './usageFileIndex.js';
 import { getCodexSessionDirs, isCodexSessionDirAccessible } from './codexDataSources.js';
 
@@ -56,7 +57,7 @@ export interface ParsedSession {
 }
 
 export interface AggregateOptions {
-  groupBy: 'day' | 'hour' | 'month' | 'session' | 'project';
+  groupBy: 'day' | 'hour' | 'fivemin' | 'month' | 'session' | 'project';
   project?: string | null;
   since?: Date | null;
   until?: Date | null;
@@ -79,7 +80,7 @@ interface AggregateBucket {
   models: Map<string, TokenAccumulator>;
 }
 
-const CODEX_INDEX_VERSION = 'codex-session-v5-multihome';
+const CODEX_INDEX_VERSION = 'codex-session-v6-5min';
 const DEFAULT_TZ = 'Asia/Shanghai';
 
 interface SerializedAggregateBucket {
@@ -443,16 +444,16 @@ function summarizeCodexSession(session: ParsedSession | null): CodexFileAggregat
   for (const ev of session.tokenEvents) {
     const model = ev.model || session.model;
     const dayKey = getDateKey(ev.timestamp, DEFAULT_TZ);
-    const hourKey = getHourKey(ev.timestamp, DEFAULT_TZ);
+    const bucketKey = getFiveMinKey(ev.timestamp, DEFAULT_TZ);
 
     addAccToSerializedBucket(bucketFor(summary.daily, dayKey), ev, model);
-    addAccToSerializedBucket(bucketFor(summary.blocks, hourKey), ev, model);
+    addAccToSerializedBucket(bucketFor(summary.blocks, bucketKey), ev, model);
 
     if (!summary.projects[projectName]) summary.projects[projectName] = {};
     addAccToSerializedBucket(bucketFor(summary.projects[projectName], dayKey), ev, model);
 
     if (!summary.projectBlocks[projectName]) summary.projectBlocks[projectName] = {};
-    addAccToSerializedBucket(bucketFor(summary.projectBlocks[projectName], hourKey), ev, model);
+    addAccToSerializedBucket(bucketFor(summary.projectBlocks[projectName], bucketKey), ev, model);
   }
 
   return summary;
@@ -497,6 +498,30 @@ function getDateKey(ts: string, tz: string): string {
 function getHourKey(ts: string, tz: string): string {
   const local = toLocalISO(ts, tz);
   return local.toISOString().slice(0, 13).replace('T', ' ') + ':00';
+}
+
+// Re-declared locally (same values as the Claude parser) to avoid a runtime
+// dependency beyond the type-only import above.
+const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5 };
+
+/** Bucket key at a fixed 5-minute granularity ('yyyy-MM-dd HH:mm'), the fine base the index layer always stores. */
+export function getFiveMinKey(ts: string, tz: string): string {
+  const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
+  const d = new Date(new Date(ts).getTime() + offset);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const minute = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${minute}`;
+}
+
+/** Coarsen a 5-min bucket key ('yyyy-MM-dd HH:mm') up to the requested granularity ('hour' yields 'yyyy-MM-dd HH'). */
+export function coarsenBucketKey(key: string, granularity: BlockGranularity): string {
+  if (granularity === '5m') return key;
+  if (granularity === 'hour') return key.slice(0, 13);   // 'yyyy-MM-dd HH'
+  const minute = String(Math.floor(Number(key.slice(14, 16)) / 15) * 15).padStart(2, '0');
+  return `${key.slice(0, 14)}${minute}`;
 }
 
 function getMonthKey(ts: string, tz: string): string {
@@ -595,6 +620,14 @@ function toAggregateBucket(bucket: SerializedAggregateBucket): AggregateBucket {
   };
 }
 
+function mergeAggregateBucket(target: AggregateBucket, source: AggregateBucket): void {
+  mergeAcc(target.acc, source.acc);
+  for (const [model, modelAcc] of source.models) {
+    if (!target.models.has(model)) target.models.set(model, emptyAcc());
+    mergeAcc(target.models.get(model)!, modelAcc);
+  }
+}
+
 function accToEntry(date: string, acc: TokenAccumulator, modelAccs: Map<string, TokenAccumulator>): DailyEntry {
   const display = displayAcc(acc);
   const modelNames = [...modelAccs.keys()];
@@ -647,6 +680,7 @@ function groupSessions(
       let key: string;
       switch (options.groupBy) {
         case 'hour':   key = getHourKey(ev.timestamp, tz); break;
+        case 'fivemin': key = getFiveMinKey(ev.timestamp, tz); break;
         case 'month':  key = getMonthKey(ev.timestamp, tz); break;
         case 'session': key = session.id; break;
         case 'project': key = extractProjectName(session.cwd); break;
@@ -740,27 +774,34 @@ function buildProjectsResponseFromSummaries(summaries: CodexFileAggregate[]): Pr
   return { projects };
 }
 
-function buildBlocksResponseFromSummaries(summaries: CodexFileAggregate[], project?: string | null): BlocksResponse {
+function buildBlocksResponseFromSummaries(
+  summaries: CodexFileAggregate[],
+  project?: string | null,
+  granularity: BlockGranularity = 'hour',
+): BlocksResponse {
   const blockBuckets: Record<string, SerializedAggregateBucket> = {};
 
   for (const summary of summaries) {
-    const source = project ? summary.projectBlocks[project] || {} : summary.blocks;
-    for (const [hourKey, bucket] of Object.entries(source)) {
-      mergeSerializedBucket(bucketFor(blockBuckets, hourKey), bucket);
+    const source = project ? summary.projectBlocks[extractProjectName(project)] || {} : summary.blocks;
+    for (const [key, bucket] of Object.entries(source)) {
+      mergeSerializedBucket(bucketFor(blockBuckets, coarsenBucketKey(key, granularity)), bucket);
     }
   }
 
+  const granMinutes = GRANULARITY_MINUTES[granularity];
   const blocks: BlockEntry[] = Object.entries(blockBuckets)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hourKey, bucket], idx) => {
+    .map(([key, bucket], idx) => {
       const { acc, models } = toAggregateBucket(bucket);
       const cost = buildModelBreakdowns(models).reduce((sum, model) => sum + model.cost, 0);
-      const [datePart, timePart] = hourKey.split(' ');
-      const hour = timePart.split(':')[0];
+      const [datePart, timePart] = key.split(' ');
+      const hour = timePart.slice(0, 2);
       return {
-        id: `codex-hour-${idx}`,
-        startTime: `${datePart}T${hour}:00:00`,
-        endTime: `${datePart}T${hour}:59:59`,
+        id: `codex-${granularity}-${idx}`,
+        startTime: granularity === 'hour' ? `${datePart}T${hour}:00:00` : `${datePart}T${timePart}:00`,
+        endTime: granularity === 'hour'
+          ? `${datePart}T${hour}:59:59`
+          : `${datePart}T${timePart.slice(0, 3)}${String(Number(timePart.slice(3, 5)) + granMinutes - 1).padStart(2, '0')}:59`,
         actualEndTime: null,
         isActive: false,
         isGap: false,
@@ -877,39 +918,49 @@ function buildProjectsResponse(sessions: ParsedSession[], options?: Partial<Aggr
   return { projects };
 }
 
-function buildBlocksResponse(sessions: ParsedSession[], options?: Partial<AggregateOptions>): BlocksResponse {
-  const grouped = groupSessions(sessions, { groupBy: 'hour', ...options });
+function buildBlocksResponse(
+  sessions: ParsedSession[],
+  options?: Partial<AggregateOptions> & { granularity?: BlockGranularity },
+): BlocksResponse {
+  const granularity = options?.granularity ?? 'hour';
+  const grouped = groupSessions(sessions, { groupBy: 'fivemin', ...options });
 
-  const blocks: BlockEntry[] = [];
-  let idx = 0;
-
-  for (const [hourKey, { acc, models }] of grouped) {
-    const cost = buildModelBreakdowns(models).reduce((sum, model) => sum + model.cost, 0);
-    const [datePart, timePart] = hourKey.split(' ');
-    const hour = timePart.split(':')[0];
-
-    blocks.push({
-      id: `codex-hour-${idx}`,
-      startTime: `${datePart}T${hour}:00:00`,
-      endTime: `${datePart}T${hour}:59:59`,
-      actualEndTime: null,
-      isActive: false,
-      isGap: false,
-      entries: acc.totalTokens > 0 ? 1 : 0,
-      tokenCounts: {
-        inputTokens: displayInputTokens(acc.inputTokens, acc.cachedInputTokens),
-        outputTokens: acc.outputTokens,
-        cacheCreationInputTokens: 0,
-        cacheReadInputTokens: acc.cachedInputTokens,
-      },
-      totalTokens: acc.totalTokens,
-      costUSD: cost,
-      models: [...models.keys()],
-    });
-    idx++;
+  const blockBuckets = new Map<string, AggregateBucket>();
+  for (const [key, bucket] of grouped) {
+    const coarseKey = coarsenBucketKey(key, granularity);
+    if (!blockBuckets.has(coarseKey)) blockBuckets.set(coarseKey, { acc: emptyAcc(), models: new Map() });
+    mergeAggregateBucket(blockBuckets.get(coarseKey)!, bucket);
   }
 
-  blocks.sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const granMinutes = GRANULARITY_MINUTES[granularity];
+  const blocks: BlockEntry[] = [...blockBuckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, { acc, models }], idx) => {
+      const cost = buildModelBreakdowns(models).reduce((sum, model) => sum + model.cost, 0);
+      const [datePart, timePart] = key.split(' ');
+      const hour = timePart.slice(0, 2);
+
+      return {
+        id: `codex-${granularity}-${idx}`,
+        startTime: granularity === 'hour' ? `${datePart}T${hour}:00:00` : `${datePart}T${timePart}:00`,
+        endTime: granularity === 'hour'
+          ? `${datePart}T${hour}:59:59`
+          : `${datePart}T${timePart.slice(0, 3)}${String(Number(timePart.slice(3, 5)) + granMinutes - 1).padStart(2, '0')}:59`,
+        actualEndTime: null,
+        isActive: false,
+        isGap: false,
+        entries: acc.totalTokens > 0 ? 1 : 0,
+        tokenCounts: {
+          inputTokens: displayInputTokens(acc.inputTokens, acc.cachedInputTokens),
+          outputTokens: acc.outputTokens,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: acc.cachedInputTokens,
+        },
+        totalTokens: acc.totalTokens,
+        costUSD: cost,
+        models: [...models.keys()],
+      };
+    });
 
   return { blocks };
 }
@@ -925,12 +976,13 @@ export function getProjectsResponse(options?: Partial<AggregateOptions>): Projec
 }
 
 /** Aggregate and return BlocksResponse format (hourly, for /blocks?agent=codex) */
-export function getBlocksResponse(options?: Partial<AggregateOptions>): BlocksResponse {
-  if (usesDefaultBundleOptions(options)) {
+export function getBlocksResponse(options?: Partial<AggregateOptions> & { granularity?: BlockGranularity }): BlocksResponse {
+  const granularity = options?.granularity ?? 'hour';
+  if (granularity === 'hour' && usesDefaultBundleOptions(options)) {
     return getCodexResponses(options).blocks;
   }
   if (!options?.since && !options?.until && (!options?.timezone || options.timezone === DEFAULT_TZ)) {
-    return buildBlocksResponseFromSummaries(loadIndexedAggregates().summaries, options?.project);
+    return buildBlocksResponseFromSummaries(loadIndexedAggregates().summaries, options?.project, granularity);
   }
-  return buildBlocksResponse(loadIndexedSessions().sessions, options);
+  return buildBlocksResponse(loadIndexedSessions().sessions, { ...options, granularity });
 }
