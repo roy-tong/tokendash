@@ -34,11 +34,42 @@ import SwiftUI
         }
     }
 
+    /// Popover hourly chart time range.
+    enum HourlyRange: String, CaseIterable, Identifiable {
+        case today, threeHours, oneHour
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .today: return "Today"
+            case .threeHours: return "Last 3 Hours"
+            case .oneHour: return "Last Hour"
+            }
+        }
+        /// Compact tab label for the chart header.
+        var shortLabel: String {
+            switch self {
+            case .today: return "Today"
+            case .threeHours: return "3H"
+            case .oneHour: return "1H"
+            }
+        }
+        var bucketMinutes: Int {
+            switch self {
+            case .today: return 60
+            case .threeHours: return 15
+            case .oneHour: return 5
+            }
+        }
+    }
+
     var refreshInterval: RefreshInterval {
         didSet { defaults.set(refreshInterval.rawValue, forKey: Keys.refreshInterval) }
     }
     var appearance: Appearance {
         didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
+    }
+    var hourlyRange: HourlyRange {
+        didSet { defaults.set(hourlyRange.rawValue, forKey: Keys.hourlyRange) }
     }
     var lowQuotaNotificationsEnabled: Bool {
         didSet { defaults.set(lowQuotaNotificationsEnabled, forKey: Keys.lowQuotaNotif) }
@@ -58,6 +89,7 @@ import SwiftUI
         static let lowQuotaNotif = "settings.lowQuotaNotifications"
         static let lowQuotaThreshold = "settings.lowQuotaThreshold"
         static let autoCheckUpdates = "settings.autoCheckUpdates"
+        static let hourlyRange = "settings.hourlyRange"
     }
 
     private init() {
@@ -71,6 +103,7 @@ import SwiftUI
         }
         let appRaw = d.string(forKey: Keys.appearance) ?? Appearance.system.rawValue
         self.appearance = Appearance(rawValue: appRaw) ?? .system
+        self.hourlyRange = HourlyRange(rawValue: d.string(forKey: Keys.hourlyRange) ?? "") ?? .today
         self.lowQuotaNotificationsEnabled = d.object(forKey: Keys.lowQuotaNotif) as? Bool ?? true
         self.lowQuotaThreshold = d.object(forKey: Keys.lowQuotaThreshold) as? Int ?? 80
         self.autoCheckUpdates = d.object(forKey: Keys.autoCheckUpdates) as? Bool ?? true
