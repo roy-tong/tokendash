@@ -230,6 +230,28 @@ final class BadgeUpdaterModeTests: XCTestCase {
         XCTAssertNil(SettingsStore.RefreshInterval(rawValue: 30), "legacy badge cadence should fall back to the one-hour default")
     }
 
+    // MARK: - stale-while-revalidate vs empty fine-grained windows
+
+    func testEmptyFineGrainedWindowDoesNotFreezePreviousTodayBuckets() async throws {
+        let state = AppState()
+        // Simulate a populated Today view (60-min buckets with usage).
+        state.hourlyData = [TimeBucket](
+            repeating: TimeBucket(start: Date(), minutes: 60, tokens: 100, isPeak: false),
+            count: 24)
+        let mock = MockAPIClient()   // returns empty blocks — a quiet 3h window
+        let updater = BadgeUpdater(state: state, client: mock)
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        SettingsStore.shared.hourlyRange = .threeHours
+        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
+
+        XCTAssertEqual(
+            state.hourlyData.first?.minutes, 15,
+            "an empty 3H window must render as a 15-min zero line, not keep the frozen Today buckets")
+        XCTAssertTrue(state.hourlyData.allSatisfy { $0.tokens == 0 })
+    }
+
     // MARK: - hourly range granularity
 
     func testFullUpdateRequestsGranularityMatchingRange() async throws {

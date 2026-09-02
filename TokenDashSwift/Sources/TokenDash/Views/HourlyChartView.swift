@@ -143,15 +143,6 @@ struct HourlyChartView: View {
         .animation(.easeInOut(duration: 0.12), value: range)
     }
 
-    private var pulseMetrics: TokenPulseMetrics {
-        TokenPulseMetrics(samples: pulseSamples)
-    }
-
-    private func formatTokenRate(_ rate: Double) -> String {
-        let rounded = max(0, Int(rate.rounded()))
-        return rounded < 1_000 ? "\(rounded)" : formatTokens(rounded)
-    }
-
     // MARK: - Area chart
 
     private var chartArea: some View {

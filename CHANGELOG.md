@@ -1,5 +1,10 @@
 # Changelog
 
+### v1.9.0 (unreleased)
+- **Hourly chart time ranges** — pick between Today (hourly buckets), Last 3 Hours (15-minute buckets), and Last Hour (5-minute buckets) from new chart-header tabs or Settings → General → Hourly Chart; tab switches persist as the default range, fine-grained tabs tighten the popover-open refresh throttle to 5 minutes, and quiet windows render as zero lines instead of empty states.
+- **Fine-grained blocks API** — `/api/blocks` accepts `granularity=hour|15m|5m` (default and invalid values fall back to hourly, hourly responses byte-identical to before); the Claude, Codex, and Pi indexes now store a 5-minute bucket base and coarsen per request, while OpenCode and OpenClaw bucket directly at the target granularity, with legacy daemons detected and gracefully downgraded to the Today view.
+- **Codex project-blocks fix** — apply the same project-name normalization when reading Codex per-project block summaries as when writing them, so `?project=` filters now actually match Codex blocks.
+
 ### v1.8.9
 - **Inspectable session analytics** — add a Sessions dashboard with model-call trends, tool and Skill distributions, duration and turn metrics, searchable session history, and task-scoped detail views.
 - **Readable task execution traces** — organize each task as overview, combined user/runtime input, model reasoning, tool parameters and results, and final responses while keeping large content available on demand.

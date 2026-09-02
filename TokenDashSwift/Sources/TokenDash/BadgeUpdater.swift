@@ -320,7 +320,12 @@ import AppKit
             // Stale-while-revalidate fallback: if this fetch came back without
             // today data (e.g. daemon warm-up still running), keep the previous
             // view rather than show an empty chart. The next refresh replaces it.
+            // Only retain data of the SAME granularity — an empty fine-grained
+            // rolling window is a legitimate state (quiet hours) and must show
+            // as a zero line, not freeze the previous Today buckets forever.
+            let sameGranularity = state.hourlyData.first?.minutes == computedBuckets.first?.minutes
             let hourly = (computedBuckets.allSatisfy { $0.tokens == 0 }
+                          && sameGranularity
                           && state.hourlyData.contains { $0.tokens > 0 })
                 ? state.hourlyData : computedBuckets
             let projectRows = (computedProjects.isEmpty && !state.projects.isEmpty)
