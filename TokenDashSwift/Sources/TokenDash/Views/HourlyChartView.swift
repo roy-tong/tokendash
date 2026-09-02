@@ -11,7 +11,10 @@ private let pulseSmoothWindow: TimeInterval = 30
 private let pulseEnabled = false
 
 struct HourlyChartView: View {
-    let data: [HourBucket]
+    // TODO(Task 9): temporary compile shim — bucket.hour accessors were
+    // replaced by hour(of:) when HourBucket became TimeBucket. The view is
+    // rewritten wholesale in Task 9; do not extend this shim.
+    let data: [TimeBucket]
     let pulseSamples: [TokenPulseSample]
     @State private var selectedMode: ChartMode = .today
     @State private var hoveredHour: Int?
@@ -29,13 +32,18 @@ struct HourlyChartView: View {
         return cal.component(.hour, from: Date())
     }
 
-    private var elapsedData: [HourBucket] {
-        data.filter { $0.hour <= currentHour }
+    /// Shim: hour-of-day of a bucket start (replaces the old HourBucket.hour).
+    private func hour(of bucket: TimeBucket) -> Int {
+        Calendar.current.component(.hour, from: bucket.start)
     }
 
-    private var hoveredBucket: HourBucket? {
+    private var elapsedData: [TimeBucket] {
+        data.filter { hour(of: $0) <= currentHour }
+    }
+
+    private var hoveredBucket: TimeBucket? {
         guard let hoveredHour else { return nil }
-        return elapsedData.first { $0.hour == hoveredHour }
+        return elapsedData.first { hour(of: $0) == hoveredHour }
     }
 
     private var yAxisUpperBound: Int {
@@ -142,7 +150,7 @@ struct HourlyChartView: View {
             ForEach(elapsedData) { bucket in
                 // Area fill
                 AreaMark(
-                    x: .value("Hour", bucket.hour),
+                    x: .value("Hour", hour(of: bucket)),
                     y: .value("Tokens", bucket.tokens)
                 )
                 .foregroundStyle(
@@ -156,7 +164,7 @@ struct HourlyChartView: View {
 
                 // Line
                 LineMark(
-                    x: .value("Hour", bucket.hour),
+                    x: .value("Hour", hour(of: bucket)),
                     y: .value("Tokens", bucket.tokens)
                 )
                 .foregroundStyle(Color.accentGreen)
@@ -164,16 +172,16 @@ struct HourlyChartView: View {
                 .interpolationMethod(.catmullRom)
 
                 // Current-hour dot with glow (uses Chart's own coordinate system)
-                if bucket.hour == currentHour {
+                if hour(of: bucket) == currentHour {
                     PointMark(
-                        x: .value("Hour", bucket.hour),
+                        x: .value("Hour", hour(of: bucket)),
                         y: .value("Tokens", bucket.tokens)
                     )
                     .foregroundStyle(Color.accentGreen.opacity(0.12))
                     .symbolSize(80)
 
                     PointMark(
-                        x: .value("Hour", bucket.hour),
+                        x: .value("Hour", hour(of: bucket)),
                         y: .value("Tokens", bucket.tokens)
                     )
                     .foregroundStyle(Color.accentGreen)
@@ -182,12 +190,12 @@ struct HourlyChartView: View {
             }
 
             if let hoveredBucket {
-                RuleMark(x: .value("Selected hour", hoveredBucket.hour))
+                RuleMark(x: .value("Selected hour", hour(of: hoveredBucket)))
                     .foregroundStyle(.secondary.opacity(0.25))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
 
                 PointMark(
-                    x: .value("Selected hour", hoveredBucket.hour),
+                    x: .value("Selected hour", hour(of: hoveredBucket)),
                     y: .value("Selected tokens", hoveredBucket.tokens)
                 )
                 .foregroundStyle(Color.accentGreen)
@@ -272,12 +280,12 @@ struct HourlyChartView: View {
         }
 
         let nearestHour = Int(hour.rounded())
-        hoveredHour = elapsedData.contains { $0.hour == nearestHour } ? nearestHour : nil
+        hoveredHour = elapsedData.contains { self.hour(of: $0) == nearestHour } ? nearestHour : nil
     }
 
-    private func hoverLabel(for bucket: HourBucket) -> some View {
+    private func hoverLabel(for bucket: TimeBucket) -> some View {
         VStack(spacing: 1) {
-            Text(String(format: "%02d:00", bucket.hour))
+            Text(String(format: "%02d:00", hour(of: bucket)))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
             Text("\(formatTokens(bucket.tokens)) tokens")

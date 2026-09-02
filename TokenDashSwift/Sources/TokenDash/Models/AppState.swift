@@ -23,7 +23,7 @@ import Combine
     var lastUpdatedAt: Date?
     var cacheRate: Double = 0
     var todaySummary: TodaySummary?
-    var hourlyData: [HourBucket] = []
+    var hourlyData: [TimeBucket] = []
     var pulseSamples: [TokenPulseSample] = TokenPulseHistoryStore.shared.load()
     var projects: [ProjectRow] = []
     var models: [ModelRow] = []

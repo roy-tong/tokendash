@@ -303,14 +303,14 @@ import AppKit
                     totalTokens: totalTokens, inputTokens: totalInput, outputTokens: totalOutput,
                     date: today, at: Date())
             }
-            let computedHourly = computeHourly(blocks: blockResults, today: today)
+            let computedBuckets = computeBuckets(blocks: blockResults, today: today)
             let computedProjects = computeProjects(projects: projectResults, today: today)
             // Stale-while-revalidate fallback: if this fetch came back without
             // today data (e.g. daemon warm-up still running), keep the previous
             // view rather than show an empty chart. The next refresh replaces it.
-            let hourly = (computedHourly.allSatisfy { $0.tokens == 0 }
+            let hourly = (computedBuckets.allSatisfy { $0.tokens == 0 }
                           && state.hourlyData.contains { $0.tokens > 0 })
-                ? state.hourlyData : computedHourly
+                ? state.hourlyData : computedBuckets
             let projectRows = (computedProjects.isEmpty && !state.projects.isEmpty)
                 ? state.projects : computedProjects
             let modelRows = computeModels(daily: dailyResults, today: today)
@@ -490,22 +490,8 @@ import AppKit
 
     // MARK: - Data computation
 
-    private func computeHourly(blocks: [BlocksResponse], today: String) -> [HourBucket] {
-        var hourly = [Int](repeating: 0, count: 24)
-        for resp in blocks {
-            for block in resp.blocks {
-                let prefix = String(block.startTime.prefix(10))
-                guard prefix == today else { continue }
-                let hourStr = block.startTime.count >= 13 ? String(block.startTime.prefix(13).suffix(2)) : ""
-                if let h = Int(hourStr), h >= 0, h < 24 {
-                    hourly[h] += block.totalTokens
-                }
-            }
-        }
-        let maxVal = hourly.max() ?? 0
-        return (0..<24).map { h in
-            HourBucket(hour: h, tokens: hourly[h], isPeak: hourly[h] > 0 && hourly[h] == maxVal)
-        }
+    private func computeBuckets(blocks: [BlocksResponse], today: String) -> [TimeBucket] {
+        UsageBucketAggregator.aggregate(blocks, range: SettingsStore.shared.hourlyRange, now: Date()).buckets
     }
 
     private func computeProjects(projects: [ProjectsResponse], today: String) -> [ProjectRow] {
