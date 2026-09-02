@@ -1,7 +1,7 @@
 import { type Request, type Response } from 'express';
 import { cache } from '../cache.js';
 import { validateDaily } from '../../shared/schemas.js';
-import { getDailyResponse as getCodexDailyResponse } from '../codexParser.js';
+import { getCodexDailyResponse } from '../codexResponseService.js';
 import { getDailyResponse as getOpenClawDailyResponse } from '../openclawParser.js';
 import { getDailyResponse as getOpencodeDailyResponse } from '../opencodeParser.js';
 import { getDailyResponse as getClaudeDailyResponse } from '../claudeJsonlParser.js';
@@ -41,23 +41,23 @@ export async function getDaily(req: Request, res: Response): Promise<void> {
   }
 }
 
-function fetchDailyData(agent: string) {
+async function fetchDailyData(agent: string) {
   if (agent === 'codex') {
-    return Promise.resolve(getCodexDailyResponse());
+    return getCodexDailyResponse();
   } else if (agent === 'openclaw') {
-    return Promise.resolve(validateDaily(getOpenClawDailyResponse()));
+    return validateDaily(getOpenClawDailyResponse());
   } else if (agent === 'opencode') {
-    return Promise.resolve(validateDaily(getOpencodeDailyResponse()));
+    return validateDaily(getOpencodeDailyResponse());
   } else if (agent === 'pi') {
-    return Promise.resolve(validateDaily(getPiDailyResponse()));
+    return validateDaily(getPiDailyResponse());
   } else {
     // Claude Code: parse JSONL directly (fast, no CLI)
-    return Promise.resolve(validateDaily(getClaudeDailyResponse()));
+    return validateDaily(getClaudeDailyResponse());
   }
 }
 
 function refreshDailyCache(agent: string, cacheKey: string): void {
-  fetchDailyData(agent)
+  void fetchDailyData(agent)
     .then(data => cache.set(cacheKey, data))
     .catch(err => console.error('Background refresh failed (daily):', err));
 }
