@@ -232,61 +232,38 @@ final class BadgeUpdaterModeTests: XCTestCase {
 
     // MARK: - stale-while-revalidate vs empty fine-grained windows
 
-    func testEmptyFineGrainedWindowDoesNotFreezePreviousTodayBuckets() async throws {
+    func testEmptyFiveMinuteBaseDoesNotFreezePreviousTodayBuckets() async throws {
         let state = AppState()
-        // Simulate a populated Today view (60-min buckets with usage).
+        // Simulate a populated legacy Today view (60-min buckets with usage).
         state.hourlyData = [TimeBucket](
             repeating: TimeBucket(start: Date(), minutes: 60, tokens: 100, isPeak: false),
             count: 24)
-        let mock = MockAPIClient()   // returns empty blocks — a quiet 3h window
+        let mock = MockAPIClient()   // returns empty blocks — daemon warm-up
         let updater = BadgeUpdater(state: state, client: mock)
-        let original = SettingsStore.shared.hourlyRange
-        defer { SettingsStore.shared.hourlyRange = original }
 
-        SettingsStore.shared.hourlyRange = .threeHours
         await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
 
         XCTAssertEqual(
-            state.hourlyData.first?.minutes, 15,
-            "an empty 3H window must render as a 15-min zero line, not keep the frozen Today buckets")
+            state.hourlyData.first?.minutes, 5,
+            "an empty 5-minute base must replace the mismatched legacy buckets, not keep them frozen")
         XCTAssertTrue(state.hourlyData.allSatisfy { $0.tokens == 0 })
     }
 
     // MARK: - hourly range granularity
 
-    func testFullUpdateRequestsGranularityMatchingRange() async throws {
+    func testFullUpdateAlwaysFetchesFiveMinuteBase() async throws {
         let state = AppState()
         let mock = MockAPIClient()
         let updater = BadgeUpdater(state: state, client: mock)
         let original = SettingsStore.shared.hourlyRange
         defer { SettingsStore.shared.hourlyRange = original }
 
-        SettingsStore.shared.hourlyRange = .threeHours
-        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
-        let granularity = await mock.lastBlocksGranularity
-        XCTAssertEqual(granularity, .fifteenMin, "3H 档位必须请求 15m 粒度")
-
-        SettingsStore.shared.hourlyRange = .oneHour
-        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
-        let granularity2 = await mock.lastBlocksGranularity
-        XCTAssertEqual(granularity2, .fiveMin, "1H 档位必须请求 5m 粒度")
-    }
-
-    func testRangeChangeTriggersCacheServedRefetch() async throws {
-        let state = AppState()
-        let mock = MockAPIClient()
-        let updater = BadgeUpdater(state: state, client: mock)
-        let original = SettingsStore.shared.hourlyRange
-        defer { SettingsStore.shared.hourlyRange = original }
-
-        await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
-        let counts = await mock.snapshot()
-
-        updater.refetchDetailForRangeChange()
-        try await waitUntil { await mock.snapshot().blocks > counts.blocks }
-
-        let lastDailyRefresh = await mock.lastDailyRefresh
-        XCTAssertEqual(lastDailyRefresh, false, "档位切换重拉走缓存（refresh=false），不强扫 JSONL")
+        for range in [SettingsStore.HourlyRange.today, .threeHours, .oneHour] {
+            SettingsStore.shared.hourlyRange = range
+            await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
+            let granularity = await mock.lastBlocksGranularity
+            XCTAssertEqual(granularity, .fiveMin, "所有档位共用一份 5min 基座（\(range)）")
+        }
     }
 
     func testFineGrainedRangeTightensPopoverThrottleToFiveMinutes() async throws {

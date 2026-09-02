@@ -73,7 +73,7 @@ struct PopoverView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 9)
 
-            loadingSection(title: "HOURLY", rows: 3, rowHeight: 18)
+            loadingSection(title: "ACTIVITY", rows: 3, rowHeight: 18)
                 .sectionDivider()
             loadingSection(title: "USAGE", rows: 3, rowHeight: 14)
                 .sectionDivider()

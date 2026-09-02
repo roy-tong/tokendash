@@ -95,9 +95,6 @@ struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
-                    .onChange(of: settings.hourlyRange) { _, _ in
-                        state.badgeUpdater?.refetchDetailForRangeChange()
-                    }
                 }
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", showDivider: false) {
                     Picker("", selection: $settings.appearance) {
@@ -105,7 +102,7 @@ struct SettingsView: View {
                             Text(a.label).tag(a)
                         }
                     }
-                    .pickerStyle(.menu).controlSize(.small).frame(width: 120).labelsHidden()
+                    .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
                 }
             }
         }

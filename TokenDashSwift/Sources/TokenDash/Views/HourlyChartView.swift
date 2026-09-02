@@ -24,11 +24,11 @@ struct HourlyChartView: View {
 
     private var calendar: Calendar { Calendar.current }
 
-    /// Effective range for rendering: when data buckets don't match the
-    /// selected range (legacy-daemon fallback produced hour buckets while a
-    /// fine-grained tab is selected), render on the Today domain instead.
+    /// Effective range for rendering: the shared 5-minute base serves every
+    /// range, but a legacy daemon (pre-1.9.0) leaves 60-minute buckets in the
+    /// store — those only support Today, so fine-grained tabs fall back to it.
     private var effectiveRange: SettingsStore.HourlyRange {
-        if range != .today, let first = data.first, first.minutes != range.bucketMinutes {
+        if range != .today, data.first?.minutes == 60 {
             return .today
         }
         return range
@@ -36,16 +36,21 @@ struct HourlyChartView: View {
 
     // MARK: - Data view model
 
-    /// Today: only elapsed hours are shown; fine-grained tabs show the
-    /// full window of buckets.
+    /// Buckets for the effective range, derived locally from the shared
+    /// 5-minute base (no refetch on tab switch). Today shows elapsed hours
+    /// only; fine-grained tabs show the full rolling window.
     private var displayBuckets: [TimeBucket] {
-        switch effectiveRange {
-        case .today:
+        if data.first?.minutes == 60 {
+            // Legacy fallback already holds Today-shaped hour buckets.
             let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
             return data.filter { $0.start <= currentHourStart }
-        case .threeHours, .oneHour:
-            return data
         }
+        var buckets = UsageBucketAggregator.reaggregate(data, to: effectiveRange, now: now)
+        if effectiveRange == .today {
+            let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
+            buckets = buckets.filter { $0.start <= currentHourStart }
+        }
+        return buckets
     }
 
     private var currentBucketStart: Date? {
@@ -68,11 +73,14 @@ struct HourlyChartView: View {
             let start = calendar.startOfDay(for: now)
             return (start, start.addingTimeInterval(24 * 3600))
         case .threeHours, .oneHour:
+            // Mirrors UsageBucketAggregator.reaggregate: complete coverage from
+            // the bucket containing now−window through the in-progress bucket.
             let window: TimeInterval = effectiveRange == .threeHours ? 3 * 3600 : 3600
             let minutes = effectiveRange.bucketMinutes
-            let alignedNow = UsageBucketAggregator.align(now, to: minutes, calendar: calendar)
-            let windowStart = alignedNow.addingTimeInterval(-window + TimeInterval(minutes) * 60)
-            return (windowStart, windowStart.addingTimeInterval(window))
+            let windowStart = UsageBucketAggregator.align(now.addingTimeInterval(-window), to: minutes, calendar: calendar)
+            let windowEnd = UsageBucketAggregator.align(now, to: minutes, calendar: calendar)
+                .addingTimeInterval(TimeInterval(minutes) * 60)
+            return (windowStart, windowEnd)
         }
     }
 
@@ -96,7 +104,7 @@ struct HourlyChartView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            Text("HOURLY")
+            Text("ACTIVITY")
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(0.5)
                 .foregroundStyle(Color.sectionTitleColor)
@@ -108,8 +116,8 @@ struct HourlyChartView: View {
     }
 
     /// Tabs write straight back to SettingsStore.hourlyRange — switching a
-    /// tab both persists the new default range and refetches detail at the
-    /// new granularity, keeping the chart and the Settings picker in sync.
+    /// tab persists the new default range while the chart re-derives from the
+    /// shared 5-minute base instantly; a throttled refresh keeps it fresh.
     private var modeTabs: some View {
         HStack(spacing: 2) {
             ForEach(SettingsStore.HourlyRange.allCases) { range in
@@ -117,7 +125,9 @@ struct HourlyChartView: View {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                         settings.hourlyRange = range
                     }
-                    state.badgeUpdater?.refetchDetailForRangeChange()
+                    Task { @MainActor in
+                        _ = await state.badgeUpdater?.refreshOnPopoverOpenIfNeeded()
+                    }
                 } label: {
                     Text(range.shortLabel)
                         .font(.system(size: 11, weight: .semibold))

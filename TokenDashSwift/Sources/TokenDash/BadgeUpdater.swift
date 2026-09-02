@@ -162,14 +162,6 @@ import AppKit
         }
     }
 
-    /// Range changed (Settings picker or chart tabs) — refetch detail with the
-    /// new granularity. Cache-served: the daemon's response cache makes repeat
-    /// toggles cheap; a cold key triggers one parse server-side.
-    func refetchDetailForRangeChange() {
-        guard mode != .suspended else { return }
-        Task { await self.performFullUpdate(forceRefresh: false, forceQuota: false) }
-    }
-
     /// Manual refresh (refresh button) — force everything, including external quota.
     func refreshNow() {
         Task {
@@ -282,12 +274,12 @@ import AppKit
             var blockResults: [BlocksResponse] = []
             var projectResults: [ProjectsResponse] = []
 
-            let granularity = Self.blocksGranularity(for: SettingsStore.shared.hourlyRange)
             for agent in agents {
                 // A forced refresh uses fresh daemon data; launch and cached
                 // detail paths can reuse the daemon's existing results.
                 if let d = try? await api.getDaily(agent: agent, refresh: forceRefresh) { dailyResults.append(d) }
-                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: granularity) { blockResults.append(b) }
+                // One 5-minute base serves every chart range (PRD v1.9.1).
+                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: .fiveMin) { blockResults.append(b) }
                 if let p = try? await api.getProjects(agent: agent, refresh: forceRefresh) { projectResults.append(p) }
             }
 
@@ -510,24 +502,16 @@ import AppKit
 
     // MARK: - Data computation
 
-    /// Blocks API granularity that matches the selected hourly range.
-    static func blocksGranularity(for range: SettingsStore.HourlyRange) -> BlocksGranularity {
-        switch range {
-        case .today: return .hour
-        case .threeHours: return .fifteenMin
-        case .oneHour: return .fiveMin
-        }
-    }
-
+    /// Blocks are always fetched at the finest granularity; every chart range
+    /// derives from this one base locally, so switching tabs needs no refetch.
     private func computeBuckets(blocks: [BlocksResponse]) -> (buckets: [TimeBucket], matched: Bool) {
-        let range = SettingsStore.shared.hourlyRange
-        let result = UsageBucketAggregator.aggregate(blocks, range: range, now: Date())
-        guard result.granularityMatched || range == .today else {
-            // Legacy daemon ignored granularity — fall back to the Today view.
-            let fallback = UsageBucketAggregator.aggregate(blocks, range: .today, now: Date())
-            return (fallback.buckets, false)
+        let result = UsageBucketAggregator.aggregate(blocks, now: Date())
+        guard result.granularityMatched else {
+            // Legacy daemon ignored granularity — keep Today-shaped buckets so
+            // the chart detects them and renders the Today view.
+            return (UsageBucketAggregator.legacyHourBuckets(blocks, now: Date()), false)
         }
-        return (result.buckets, result.granularityMatched)
+        return (result.buckets, true)
     }
 
     private func computeProjects(projects: [ProjectsResponse], today: String) -> [ProjectRow] {

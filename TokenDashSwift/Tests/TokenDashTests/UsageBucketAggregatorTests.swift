@@ -15,74 +15,108 @@ final class UsageBucketAggregatorTests: XCTestCase {
         })
     }
 
-    private var now: Date { formatter.date(from: "2026-09-01T14:07:00")! }
+    private func date(_ s: String) -> Date { formatter.date(from: s)! }
 
-    func testTodayBucketsFull24HourSkeleton() {
-        let resp = blocks(["2026-09-01T09:30:00", "2026-09-01T10:45:00", "2026-08-31T23:00:00"])
-        let result = UsageBucketAggregator.aggregate([resp], range: .today, now: now)
-        // The aggregator returns the full 24-bucket skeleton (elapsed filtering
-        // is done by the view's displayBuckets).
-        XCTAssertEqual(result.buckets.count, 24)
-        XCTAssertEqual(result.buckets[9].tokens, 100)
-        XCTAssertEqual(result.buckets[10].tokens, 100)
-        XCTAssertEqual(result.buckets[14].tokens, 0, "future hours are zero")
-        XCTAssertTrue(result.granularityMatched, "today is always matched (no downgrade concept)")
-    }
+    private var now: Date { date("2026-09-01T14:07:00") }
 
-    func testThreeHoursProducesTwelveFifteenMinBuckets() {
-        let resp = blocks(["2026-09-01T11:30:00", "2026-09-01T14:00:00", "2026-09-01T10:59:00"])
-        let result = UsageBucketAggregator.aggregate([resp], range: .threeHours, now: now)
-        // Window = floor(14:07, 15m) - 3h + 15m = [11:15, 14:15), 12 buckets.
-        XCTAssertEqual(result.buckets.count, 12)
+    // MARK: - aggregate (5-minute base)
+
+    func testAggregateProducesFiveMinuteBucketsOnAlignedGrid() {
+        let resp = blocks(["2026-09-01T09:31:00", "2026-09-01T09:34:00", "2026-09-01T09:59:00"])
+        let result = UsageBucketAggregator.aggregate([resp], now: now)
+        XCTAssertTrue(result.granularityMatched, "sub-hour start times prove fine-grained data")
         let byStart = Dictionary(uniqueKeysWithValues: result.buckets.map { ($0.start, $0.tokens) })
-        let t1130 = formatter.date(from: "2026-09-01T11:30:00")!
-        let t1400 = formatter.date(from: "2026-09-01T14:00:00")!
-        // Block starts floor onto the bucket grid (matching the daemon's own
-        // coarsening), so 11:30 lands in the 11:30 bucket — not 11:15.
-        XCTAssertEqual(byStart[t1130], 100, "11:30 floors into the 11:30 bucket")
-        XCTAssertEqual(byStart[t1400], 100, "14:00 is the in-progress bucket")
-        XCTAssertNil(byStart[formatter.date(from: "2026-09-01T10:59:00")!], "outside the window is dropped")
+        XCTAssertEqual(byStart[date("2026-09-01T09:30:00")], 200, "09:31 与 09:34 落同一 5m 桶")
+        XCTAssertEqual(byStart[date("2026-09-01T09:55:00")], 100, "09:59 落 09:55 桶")
+        XCTAssertTrue(result.buckets.allSatisfy { $0.minutes == 5 })
     }
 
-    func testOneHourProducesTwelveFiveMinBuckets() {
-        let resp = blocks(["2026-09-01T13:12:00", "2026-09-01T13:59:00"])
-        let result = UsageBucketAggregator.aggregate([resp], range: .oneHour, now: now)
-        XCTAssertEqual(result.buckets.count, 12)
-        let starts = result.buckets.map { formatter.string(from: $0.start) }
-        // Window start = floor(14:07, 5m) - 1h + 5m = 14:05 - 1h + 5m = 13:10.
-        XCTAssertEqual(starts.first, "2026-09-01T13:10:00")
-        XCTAssertEqual(starts.last, "2026-09-01T14:05:00")
+    func testAggregateKeepsCrossDayBuckets() {
+        let lateNight = date("2026-09-02T00:07:00")
+        let resp = blocks(["2026-09-01T22:33:00"])
+        let result = UsageBucketAggregator.aggregate([resp], now: lateNight)
+        XCTAssertTrue(result.buckets.contains {
+            $0.start == date("2026-09-01T22:30:00") && $0.tokens == 100
+        }, "48h 基座窗口保留昨天的 5m 桶（供跨天 3H 窗口派生）")
     }
 
-    func testMultipleAgentsSumIntoSameBuckets() {
-        let a = blocks(["2026-09-01T13:12:00"], tokens: 100)
-        let b = blocks(["2026-09-01T13:13:00"], tokens: 40)
-        let result = UsageBucketAggregator.aggregate([a, b], range: .oneHour, now: now)
-        let t1310 = formatter.date(from: "2026-09-01T13:10:00")!
-        XCTAssertEqual(result.buckets.first { $0.start == t1310 }?.tokens, 140)
+    func testAggregateDetectsLegacyHourAlignedDaemon() {
+        let resp = blocks(["2026-09-01T13:00:00", "2026-09-01T14:00:00"])
+        let result = UsageBucketAggregator.aggregate([resp], now: now)
+        XCTAssertFalse(result.granularityMatched, "全部整点对齐 = 旧 daemon 忽略了粒度参数")
     }
 
-    func testCrossDayWindowIncludesYesterdayBuckets() {
-        // now = 00:07 early morning; the 3h window reaches back to 21:15
-        // the previous day.
-        let lateNight = formatter.date(from: "2026-09-02T00:07:00")!
-        let resp = blocks(["2026-09-01T22:30:00"])
-        let result = UsageBucketAggregator.aggregate([resp], range: .threeHours, now: lateNight)
-        XCTAssertEqual(result.buckets.first.map { formatter.string(from: $0.start) }, "2026-09-01T21:15:00")
-        XCTAssertTrue(result.buckets.contains { $0.tokens == 100 })
+    func testAggregateEmptyWindowCountsAsMatched() {
+        let result = UsageBucketAggregator.aggregate([blocks([])], now: now)
+        XCTAssertTrue(result.granularityMatched, "空窗口无法证伪粒度，按 matched 处理渲染 0 线")
     }
 
-    func testGranularityMismatchDetectedForLegacyDaemon() {
-        // Fine-grained request but every returned start is hour-aligned (a
-        // legacy daemon ignored the parameter) -> matched = false.
-        let resp = blocks(["2026-09-01T14:00:00", "2026-09-01T13:00:00"])
-        let result = UsageBucketAggregator.aggregate([resp], range: .oneHour, now: now)
-        XCTAssertFalse(result.granularityMatched, "legacy hour data should trigger the fallback")
+    func testLegacyHourBucketsProducesTodaySkeleton() {
+        let resp = blocks(["2026-09-01T09:00:00", "2026-08-31T23:00:00"])
+        let buckets = UsageBucketAggregator.legacyHourBuckets([resp], now: now)
+        XCTAssertEqual(buckets.count, 24)
+        XCTAssertTrue(buckets.allSatisfy { $0.minutes == 60 })
+        XCTAssertEqual(buckets[9].tokens, 100, "今天 9 点桶有值")
+        XCTAssertFalse(buckets.contains { $0.start == date("2026-08-31T23:00:00") }, "昨天丢弃")
     }
 
-    func testIsPeakFlagsMaxBucketOnly() {
-        let resp = blocks(["2026-09-01T13:12:00", "2026-09-01T13:13:00", "2026-09-01T13:13:30"], tokens: 50)
-        let result = UsageBucketAggregator.aggregate([resp], range: .oneHour, now: now)
-        XCTAssertEqual(result.buckets.filter(\.isPeak).count, 1)
+    // MARK: - reaggregate (local range derivation)
+
+    func testReaggregateTodayDerivesHourBucketsFromFiveMinuteBase() {
+        let base = [
+            TimeBucket(start: date("2026-09-01T09:05:00"), minutes: 5, tokens: 30, isPeak: false),
+            TimeBucket(start: date("2026-09-01T09:25:00"), minutes: 5, tokens: 70, isPeak: false),
+            TimeBucket(start: date("2026-09-01T10:45:00"), minutes: 5, tokens: 100, isPeak: false),
+        ]
+        let buckets = UsageBucketAggregator.reaggregate(base, to: .today, now: now)
+        XCTAssertEqual(buckets.count, 24, "today 完整骨架")
+        XCTAssertTrue(buckets.allSatisfy { $0.minutes == 60 })
+        XCTAssertEqual(buckets[9].tokens, 100, "09:05+09:25 归并到 9 点桶")
+        XCTAssertEqual(buckets[10].tokens, 100)
+        XCTAssertEqual(buckets[14].tokens, 0, "未来小时为 0")
+    }
+
+    func testReaggregateThreeHoursProducesCompleteFifteenMinWindow() {
+        // 窗口 = [align(14:07−3h)=11:00, align(14:07)+15m=14:15)，13 桶完整覆盖
+        let base = [
+            TimeBucket(start: date("2026-09-01T11:30:00"), minutes: 5, tokens: 60, isPeak: false),
+            TimeBucket(start: date("2026-09-01T11:40:00"), minutes: 5, tokens: 40, isPeak: false),
+            TimeBucket(start: date("2026-09-01T14:00:00"), minutes: 5, tokens: 100, isPeak: false),
+            TimeBucket(start: date("2026-09-01T10:55:00"), minutes: 5, tokens: 999, isPeak: false),
+        ]
+        let buckets = UsageBucketAggregator.reaggregate(base, to: .threeHours, now: now)
+        XCTAssertEqual(buckets.count, 13, "完整覆盖 3h（首桶含 now−3h、末桶进行中）")
+        XCTAssertTrue(buckets.allSatisfy { $0.minutes == 15 })
+        XCTAssertEqual(buckets.first?.start, date("2026-09-01T11:00:00"))
+        XCTAssertEqual(buckets.last?.start, date("2026-09-01T14:00:00"))
+        let byStart = Dictionary(uniqueKeysWithValues: buckets.map { ($0.start, $0.tokens) })
+        XCTAssertEqual(byStart[date("2026-09-01T11:30:00")], 100, "11:30+11:40 归并到 11:30 桶（10:55 窗口外丢弃）")
+        XCTAssertEqual(byStart[date("2026-09-01T14:00:00")], 100, "当前进行中桶")
+    }
+
+    func testReaggregateOneHourPassesThroughFiveMinuteBuckets() {
+        // 窗口 = [align(14:07−1h)=13:05, 14:10)，13 桶
+        let base = [
+            TimeBucket(start: date("2026-09-01T13:07:00"), minutes: 5, tokens: 100, isPeak: false),
+            TimeBucket(start: date("2026-09-01T13:05:00"), minutes: 5, tokens: 40, isPeak: false),
+            TimeBucket(start: date("2026-09-01T14:30:00"), minutes: 5, tokens: 999, isPeak: false),
+        ]
+        let buckets = UsageBucketAggregator.reaggregate(base, to: .oneHour, now: now)
+        XCTAssertEqual(buckets.count, 13, "完整覆盖 1h（首桶含 now−1h、末桶进行中）")
+        let byStart = Dictionary(uniqueKeysWithValues: buckets.map { ($0.start, $0.tokens) })
+        XCTAssertEqual(byStart[date("2026-09-01T13:05:00")], 140, "13:05 与 13:07 同桶求和；14:30 窗口外丢弃")
+        XCTAssertEqual(buckets.first?.start, date("2026-09-01T13:05:00"))
+        XCTAssertEqual(buckets.last?.start, date("2026-09-01T14:05:00"))
+    }
+
+    func testReaggregateCrossDayThreeHourWindow() {
+        // now = 凌晨 00:07，窗口 = [align(21:07)=21:00, 00:15)，跨到昨天
+        let lateNight = date("2026-09-02T00:07:00")
+        let base = [
+            TimeBucket(start: date("2026-09-01T22:33:00"), minutes: 5, tokens: 100, isPeak: false),
+        ]
+        let buckets = UsageBucketAggregator.reaggregate(base, to: .threeHours, now: lateNight)
+        XCTAssertEqual(buckets.first?.start, date("2026-09-01T21:00:00"))
+        XCTAssertEqual(buckets.first { $0.tokens == 100 }?.start, date("2026-09-01T22:30:00"))
     }
 }
