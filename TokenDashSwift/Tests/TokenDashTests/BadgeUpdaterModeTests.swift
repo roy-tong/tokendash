@@ -241,6 +241,7 @@ actor MockAPIClient: APIClientProtocol {
     private(set) var quota = 0
     private(set) var lastQuotaRefresh: Bool? = nil
     private(set) var lastDailyRefresh: Bool? = nil
+    private(set) var lastBlocksGranularity: BlocksGranularity? = nil
 
     struct Snapshot {
         let agents: Int; let daily: Int; let blocks: Int
@@ -264,8 +265,9 @@ actor MockAPIClient: APIClientProtocol {
         lastDailyRefresh = refresh
         return DailyResponse(daily: [])
     }
-    func getBlocks(agent: String, refresh: Bool) async throws -> BlocksResponse {
+    func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
         blocks += 1
+        lastBlocksGranularity = granularity
         return BlocksResponse(blocks: [])
     }
     func getProjects(agent: String, refresh: Bool) async throws -> ProjectsResponse {
@@ -362,7 +364,7 @@ actor BlockingAPIClient: APIClientProtocol {
         return DailyResponse(daily: [])
     }
 
-    func getBlocks(agent: String, refresh: Bool) async throws -> BlocksResponse {
+    func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
         BlocksResponse(blocks: [])
     }
 
@@ -386,7 +388,7 @@ actor FailingQuotaAPIClient: APIClientProtocol {
         DailyResponse(daily: [])
     }
 
-    func getBlocks(agent: String, refresh: Bool) async throws -> BlocksResponse {
+    func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
         BlocksResponse(blocks: [])
     }
 

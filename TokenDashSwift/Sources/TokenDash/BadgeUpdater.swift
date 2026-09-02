@@ -275,7 +275,7 @@ import AppKit
                 // A forced refresh uses fresh daemon data; launch and cached
                 // detail paths can reuse the daemon's existing results.
                 if let d = try? await api.getDaily(agent: agent, refresh: forceRefresh) { dailyResults.append(d) }
-                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh) { blockResults.append(b) }
+                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: .hour) { blockResults.append(b) }
                 if let p = try? await api.getProjects(agent: agent, refresh: forceRefresh) { projectResults.append(p) }
             }
 
