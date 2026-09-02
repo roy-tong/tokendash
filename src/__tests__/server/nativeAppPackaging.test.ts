@@ -240,7 +240,8 @@ esac
     // v1.8.0: detail endpoints take a `forceRefresh` flag — true on popover open
     // (forces past the cache), false on the 60s background timer (cache-served).
     expect(badgeUpdater).toContain('api.getDaily(agent: agent, refresh: forceRefresh)');
-    expect(badgeUpdater).toContain('api.getBlocks(agent: agent, refresh: forceRefresh)');
+    // v1.9.0: blocks also pass the range-matched granularity alongside the flag.
+    expect(badgeUpdater).toContain('api.getBlocks(agent: agent, refresh: forceRefresh, granularity: granularity)');
     expect(badgeUpdater).toContain('api.getProjects(agent: agent, refresh: forceRefresh)');
     expect(badgeUpdater).toContain('api.getQuota(refresh: force)');
     // popover open must still force-refresh (the v1.7.5 guarantee, now via flag)
