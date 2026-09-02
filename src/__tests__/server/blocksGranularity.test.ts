@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { getFiveMinKey, coarsenBucketKey } from '../../server/claudeJsonlParser.js';
 import { getFiveMinKey as codexFiveMinKey, coarsenBucketKey as codexCoarsen } from '../../server/codexParser.js';
+import { getFiveMinKey as piFiveMinKey, coarsenBucketKey as piCoarsen } from '../../server/piParser.js';
 
 describe('claude getFiveMinKey', () => {
   it('converts UTC timestamp to Asia/Shanghai 5-min key', () => {
@@ -40,5 +41,14 @@ describe('codex 5-min keys (space-separated key family)', () => {
   });
   it('coarsens to 15m', () => {
     expect(codexCoarsen('2026-04-15 16:35', '15m')).toBe('2026-04-15 16:30');
+  });
+});
+
+describe('pi 5-min keys', () => {
+  it('floors to 5-min at Shanghai tz', () => {
+    expect(piFiveMinKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15 16:05');
+  });
+  it('coarsens to 15m', () => {
+    expect(piCoarsen('2026-04-15 16:35', '15m')).toBe('2026-04-15 16:30');
   });
 });

@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync, accessSync, constants } from 'node
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { DailyEntry, DailyResponse, ProjectsResponse, BlockEntry, BlocksResponse } from '../shared/types.js';
+import { type BlockGranularity } from './claudeJsonlParser.js';
 
 // ---------------------------------------------------------------------------
 // OpenClaw JSONL format
@@ -288,6 +289,18 @@ function getHourKey(ms: number, tz: string): string {
   return d.toISOString().slice(0, 13).replace('T', ' ') + ':00';
 }
 
+/** Bucket key floored to an arbitrary minute granularity ('yyyy-MM-dd HH:mm'). */
+function getGranularityKey(ms: number, tz: string, minutes: number): string {
+  const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
+  const d = new Date(ms + offset);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const minute = String(Math.floor(d.getUTCMinutes() / minutes) * minutes).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${minute}`;
+}
+
 function getMonthKey(ms: number, tz: string): string {
   return getDateKey(ms, tz).slice(0, 7);
 }
@@ -427,10 +440,14 @@ export function getProjectsResponse(options?: OpenClawAggregateOptions): Project
   return { projects };
 }
 
-export function getBlocksResponse(options?: OpenClawAggregateOptions): BlocksResponse {
+export function getBlocksResponse(options?: OpenClawAggregateOptions & { granularity?: BlockGranularity }): BlocksResponse {
   const sessions = parseAllOpenClawSessions();
   const tz = options?.timezone || 'Asia/Shanghai';
+  const granularity = options?.granularity ?? 'hour';
+  const granMinutes = granularity === 'hour' ? 60 : granularity === '15m' ? 15 : 5;
 
+  // No persistent index here — sessions are re-parsed per request, so bucket
+  // directly at the target granularity.
   const grouped = new Map<string, { acc: TokenAccumulator; models: Set<string> }>();
 
   for (const session of sessions) {
@@ -440,7 +457,9 @@ export function getBlocksResponse(options?: OpenClawAggregateOptions): BlocksRes
       if (options?.since && ev.timestampMs < options.since.getTime()) continue;
       if (options?.until && ev.timestampMs > options.until.getTime()) continue;
 
-      const key = getHourKey(ev.timestampMs, tz);
+      const key = granularity === 'hour'
+        ? getHourKey(ev.timestampMs, tz)
+        : getGranularityKey(ev.timestampMs, tz, granMinutes);
       if (!grouped.has(key)) grouped.set(key, { acc: emptyAcc(), models: new Set() });
       addEvent(grouped.get(key)!.acc, ev);
       grouped.get(key)!.models.add(ev.model);
@@ -450,13 +469,15 @@ export function getBlocksResponse(options?: OpenClawAggregateOptions): BlocksRes
   const blocks: BlockEntry[] = [];
   let idx = 0;
 
-  for (const [hourKey, { acc, models }] of grouped) {
-    const [datePart, timePart] = hourKey.split(' ');
-    const hour = timePart.split(':')[0];
+  for (const [bucketKey, { acc, models }] of grouped) {
+    const [datePart, timePart] = bucketKey.split(' ');
+    const hour = timePart.slice(0, 2);
     blocks.push({
-      id: `openclaw-hour-${idx}`,
-      startTime: `${datePart}T${hour}:00:00`,
-      endTime: `${datePart}T${hour}:59:59`,
+      id: `openclaw-${granularity}-${idx}`,
+      startTime: granularity === 'hour' ? `${datePart}T${hour}:00:00` : `${datePart}T${timePart}:00`,
+      endTime: granularity === 'hour'
+        ? `${datePart}T${hour}:59:59`
+        : `${datePart}T${timePart.slice(0, 3)}${String(Number(timePart.slice(3, 5)) + granMinutes - 1).padStart(2, '0')}:59`,
       actualEndTime: null,
       isActive: false,
       isGap: false,

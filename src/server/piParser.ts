@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { DailyEntry, DailyResponse, ProjectsResponse, BlockEntry, BlocksResponse, ModelBreakdown } from '../shared/types.js';
 import { buildUsageFileIndex } from './usageFileIndex.js';
+import { type BlockGranularity } from './claudeJsonlParser.js';
 
 // ---------------------------------------------------------------------------
 // Pi JSONL 格式说明
@@ -17,7 +18,7 @@ import { buildUsageFileIndex } from './usageFileIndex.js';
 //                    以及 message.model / message.provider
 // ---------------------------------------------------------------------------
 
-const PI_INDEX_VERSION = 'pi-session-v1';
+const PI_INDEX_VERSION = 'pi-session-v2-5min';
 const DEFAULT_TZ = 'Asia/Shanghai';
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,30 @@ function getHourKey(ts: string, tz: string): string {
   return local.toISOString().slice(0, 13).replace('T', ' ') + ':00';
 }
 
+// Re-declared locally (same values as the Claude parser) to avoid a runtime
+// dependency beyond the type-only import above.
+const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5 };
+
+/** Bucket key at a fixed 5-minute granularity ('yyyy-MM-dd HH:mm'), the fine base the index layer always stores. */
+export function getFiveMinKey(ts: string, tz: string): string {
+  const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
+  const d = new Date(new Date(ts).getTime() + offset);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const minute = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${minute}`;
+}
+
+/** Coarsen a 5-min bucket key ('yyyy-MM-dd HH:mm') up to the requested granularity ('hour' yields 'yyyy-MM-dd HH'). */
+export function coarsenBucketKey(key: string, granularity: BlockGranularity): string {
+  if (granularity === '5m') return key;
+  if (granularity === 'hour') return key.slice(0, 13);   // 'yyyy-MM-dd HH'
+  const minute = String(Math.floor(Number(key.slice(14, 16)) / 15) * 15).padStart(2, '0');
+  return `${key.slice(0, 14)}${minute}`;
+}
+
 /** Keep the full working-directory path so same-named projects do not merge. */
 export function normalizePiProjectPath(cwd: string): string {
   if (!cwd) return 'unknown';
@@ -264,6 +289,14 @@ function addToBucket(bucket: AggregateBucket, ev: PiTokenEvent): void {
   addEvent(bucket.models.get(ev.model)!, ev);
 }
 
+function mergeAggregateBucket(target: AggregateBucket, source: AggregateBucket): void {
+  mergeAcc(target.acc, source.acc);
+  for (const [model, m] of source.models) {
+    if (!target.models.has(model)) target.models.set(model, emptyAcc());
+    mergeAcc(target.models.get(model)!, m);
+  }
+}
+
 function accToEntry(date: string, acc: TokenAccumulator, modelAccs: Map<string, TokenAccumulator>): DailyEntry {
   const modelBreakdowns: ModelBreakdown[] = [...modelAccs.entries()].map(([modelName, m]) => ({
     modelName,
@@ -288,7 +321,7 @@ function accToEntry(date: string, acc: TokenAccumulator, modelAccs: Map<string, 
 
 function groupSessions(
   sessions: PiSession[],
-  groupBy: 'day' | 'hour' | 'project',
+  groupBy: 'day' | 'hour' | 'project' | 'fivemin',
   tz: string,
   projectFilter?: string | null,
 ): Map<string, AggregateBucket> {
@@ -302,6 +335,8 @@ function groupSessions(
       let key: string;
       if (groupBy === 'hour') {
         key = getHourKey(ev.timestamp, tz);
+      } else if (groupBy === 'fivemin') {
+        key = getFiveMinKey(ev.timestamp, tz);
       } else if (groupBy === 'project') {
         key = projectName;
       } else {
@@ -381,20 +416,35 @@ export function getProjectsResponse(options?: { timezone?: string }): ProjectsRe
   return { projects };
 }
 
-export function getBlocksResponse(options?: { project?: string | null; timezone?: string }): BlocksResponse {
+export function getBlocksResponse(options?: { project?: string | null; timezone?: string; granularity?: BlockGranularity }): BlocksResponse {
   const tz = options?.timezone || DEFAULT_TZ;
+  const granularity = options?.granularity ?? 'hour';
   const sessions = loadSessions();
-  const grouped = groupSessions(sessions, 'hour', tz, options?.project);
 
-  const blocks: BlockEntry[] = [...grouped.entries()]
+  // Group at a fixed 5-min base, then coarsen to the target granularity so the
+  // on-disk index stays decoupled from the requested bucket size.
+  const grouped = groupSessions(sessions, 'fivemin', tz, options?.project);
+
+  const blockBuckets = new Map<string, AggregateBucket>();
+  for (const [key, bucket] of grouped) {
+    const coarseKey = coarsenBucketKey(key, granularity);
+    if (!blockBuckets.has(coarseKey)) blockBuckets.set(coarseKey, { acc: emptyAcc(), models: new Map() });
+    mergeAggregateBucket(blockBuckets.get(coarseKey)!, bucket);
+  }
+
+  const granMinutes = GRANULARITY_MINUTES[granularity];
+  const blocks: BlockEntry[] = [...blockBuckets.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hourKey, { acc, models }], idx) => {
-      const [datePart, timePart] = hourKey.split(' ');
-      const hour = timePart.split(':')[0];
+    .map(([key, { acc, models }], idx) => {
+      const [datePart, timePart] = key.split(' ');
+      const hour = timePart.slice(0, 2);
+
       return {
-        id: `pi-hour-${idx}`,
-        startTime: `${datePart}T${hour}:00:00`,
-        endTime: `${datePart}T${hour}:59:59`,
+        id: `pi-${granularity}-${idx}`,
+        startTime: granularity === 'hour' ? `${datePart}T${hour}:00:00` : `${datePart}T${timePart}:00`,
+        endTime: granularity === 'hour'
+          ? `${datePart}T${hour}:59:59`
+          : `${datePart}T${timePart.slice(0, 3)}${String(Number(timePart.slice(3, 5)) + granMinutes - 1).padStart(2, '0')}:59`,
         actualEndTime: null,
         isActive: false,
         isGap: false,
