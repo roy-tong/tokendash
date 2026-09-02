@@ -88,6 +88,17 @@ struct SettingsView: View {
                         state.badgeUpdater?.applyRefreshIntervalChange()
                     }
                 }
+                SettingsRow(icon: "chart.xyaxis.line", title: "Hourly Chart", showDivider: true) {
+                    Picker("", selection: $settings.hourlyRange) {
+                        ForEach(SettingsStore.HourlyRange.allCases) { range in
+                            Text(range.label).tag(range)
+                        }
+                    }
+                    .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
+                    .onChange(of: settings.hourlyRange) { _, _ in
+                        state.badgeUpdater?.refetchDetailForRangeChange()
+                    }
+                }
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", showDivider: false) {
                     Picker("", selection: $settings.appearance) {
                         ForEach(SettingsStore.Appearance.allCases) { a in

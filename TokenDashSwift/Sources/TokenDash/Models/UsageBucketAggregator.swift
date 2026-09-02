@@ -73,7 +73,9 @@ enum UsageBucketAggregator {
     /// for 15-minute buckets), matching how the daemon coarsens its 5-minute
     /// base buckets. `Calendar.dateInterval(of:value:for:)` is unavailable in
     /// this SDK, so the floor is computed from the minute-of-day.
-    private static func align(_ date: Date, to minutes: Int, calendar: Calendar) -> Date {
+    /// Internal: shared with HourlyChartView so hover alignment and the
+    /// aggregation use one identical floor.
+    static func align(_ date: Date, to minutes: Int, calendar: Calendar) -> Date {
         let dayStart = calendar.startOfDay(for: date)
         let comps = calendar.dateComponents([.hour, .minute], from: date)
         let minuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)

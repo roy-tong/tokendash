@@ -11,54 +11,79 @@ private let pulseSmoothWindow: TimeInterval = 30
 private let pulseEnabled = false
 
 struct HourlyChartView: View {
-    // TODO(Task 9): temporary compile shim — bucket.hour accessors were
-    // replaced by hour(of:) when HourBucket became TimeBucket. The view is
-    // rewritten wholesale in Task 9; do not extend this shim.
     let data: [TimeBucket]
     let pulseSamples: [TokenPulseSample]
-    @State private var selectedMode: ChartMode = .today
-    @State private var hoveredHour: Int?
+    @Environment(AppState.self) private var state
+    @Bindable private var settings = SettingsStore.shared
+    @State private var hoveredBucketID: Date?
     @Namespace private var selectorAnimation
 
-    private enum ChartMode: String, CaseIterable, Identifiable {
-        case today = "Today"
-        case pulse = "Pulse"
+    private var range: SettingsStore.HourlyRange { settings.hourlyRange }
 
-        var id: Self { self }
+    private var now: Date { Date() }
+
+    private var calendar: Calendar { Calendar.current }
+
+    /// Effective range for rendering: when data buckets don't match the
+    /// selected range (legacy-daemon fallback produced hour buckets while a
+    /// fine-grained tab is selected), render on the Today domain instead.
+    private var effectiveRange: SettingsStore.HourlyRange {
+        if range != .today, let first = data.first, first.minutes != range.bucketMinutes {
+            return .today
+        }
+        return range
     }
 
-    private var currentHour: Int {
-        let cal = Calendar.current
-        return cal.component(.hour, from: Date())
+    // MARK: - Data view model
+
+    /// Today: only elapsed hours are shown; fine-grained tabs show the
+    /// full window of buckets.
+    private var displayBuckets: [TimeBucket] {
+        switch effectiveRange {
+        case .today:
+            let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
+            return data.filter { $0.start <= currentHourStart }
+        case .threeHours, .oneHour:
+            return data
+        }
     }
 
-    /// Shim: hour-of-day of a bucket start (replaces the old HourBucket.hour).
-    private func hour(of bucket: TimeBucket) -> Int {
-        Calendar.current.component(.hour, from: bucket.start)
-    }
-
-    private var elapsedData: [TimeBucket] {
-        data.filter { hour(of: $0) <= currentHour }
+    private var currentBucketStart: Date? {
+        UsageBucketAggregator.align(now, to: effectiveRange.bucketMinutes, calendar: calendar)
     }
 
     private var hoveredBucket: TimeBucket? {
-        guard let hoveredHour else { return nil }
-        return elapsedData.first { hour(of: $0) == hoveredHour }
+        guard let hoveredBucketID else { return nil }
+        return displayBuckets.first { $0.start == hoveredBucketID }
     }
 
     private var yAxisUpperBound: Int {
-        let maximum = elapsedData.map(\.tokens).max() ?? 0
+        let maximum = displayBuckets.map(\.tokens).max() ?? 0
         return max(1, Int(ceil(Double(maximum) * 1.15)))
     }
+
+    private var xDomain: (min: Date, max: Date) {
+        switch effectiveRange {
+        case .today:
+            let start = calendar.startOfDay(for: now)
+            return (start, start.addingTimeInterval(24 * 3600))
+        case .threeHours, .oneHour:
+            let window: TimeInterval = effectiveRange == .threeHours ? 3 * 3600 : 3600
+            let minutes = effectiveRange.bucketMinutes
+            let alignedNow = UsageBucketAggregator.align(now, to: minutes, calendar: calendar)
+            let windowStart = alignedNow.addingTimeInterval(-window + TimeInterval(minutes) * 60)
+            return (windowStart, windowStart.addingTimeInterval(window))
+        }
+    }
+
+    // MARK: - Layout
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(.bottom, 10)
 
-            if pulseEnabled && selectedMode == .pulse {
-                TokenPulseChartView(samples: pulseSamples)
-            } else if data.allSatisfy({ $0.tokens == 0 }) {
+            if effectiveRange == .today && data.allSatisfy({ $0.tokens == 0 }) {
                 emptyChart
             } else {
                 chartArea
@@ -71,67 +96,51 @@ struct HourlyChartView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            if pulseEnabled && selectedMode == .pulse {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(pulseMetrics.isStageActive ? Color.accentGreen : Color.tertiaryLabel)
-                        .frame(width: 6, height: 6)
-                    Text(pulseMetrics.isStageActive ? "STAGE AVG" : "IDLE")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("\(formatTokenRate(pulseMetrics.isStageActive ? pulseMetrics.stageAverageRate : 0))/s")
-                        .font(.system(size: 10, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(Color.secondaryLabel)
-                }
-                .foregroundStyle(pulseMetrics.isStageActive ? Color.accentGreen : Color.secondaryLabel)
-            } else {
-                Text("HOURLY")
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(Color.sectionTitleColor)
-            }
+            Text("HOURLY")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(Color.sectionTitleColor)
 
             Spacer()
 
-            if pulseEnabled {
-                modeTabs
-            }
+            modeTabs
         }
     }
 
+    /// Tabs write straight back to SettingsStore.hourlyRange — switching a
+    /// tab both persists the new default range and refetches detail at the
+    /// new granularity, keeping the chart and the Settings picker in sync.
     private var modeTabs: some View {
         HStack(spacing: 2) {
-            ForEach(ChartMode.allCases) { mode in
+            ForEach(SettingsStore.HourlyRange.allCases) { range in
                 Button {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                        selectedMode = mode
+                        settings.hourlyRange = range
                     }
+                    state.badgeUpdater?.refetchDetailForRangeChange()
                 } label: {
-                    Text(mode.rawValue)
+                    Text(range.shortLabel)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(selectedMode == mode ? Color.white : Color.secondaryLabel)
+                        .foregroundStyle(self.range == range ? Color.white : Color.secondaryLabel)
                         .padding(.horizontal, 11)
                         .frame(height: 24)
                         .background {
-                            if selectedMode == mode {
+                            if self.range == range {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(Color.accentGreen)
-                                    .matchedGeometryEffect(
-                                        id: "hour-mode-selection",
-                                        in: selectorAnimation
-                                    )
+                                    .matchedGeometryEffect(id: "hour-mode-selection", in: selectorAnimation)
                             }
                         }
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(selectedMode == mode ? .isSelected : [])
+                .accessibilityAddTraits(self.range == range ? .isSelected : [])
             }
         }
         .padding(2)
         .background(Color.primary.opacity(0.055))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .fixedSize()
-        .animation(.easeInOut(duration: 0.12), value: selectedMode)
+        .animation(.easeInOut(duration: 0.12), value: range)
     }
 
     private var pulseMetrics: TokenPulseMetrics {
@@ -147,10 +156,10 @@ struct HourlyChartView: View {
 
     private var chartArea: some View {
         Chart {
-            ForEach(elapsedData) { bucket in
+            ForEach(displayBuckets) { bucket in
                 // Area fill
                 AreaMark(
-                    x: .value("Hour", hour(of: bucket)),
+                    x: .value("Time", bucket.start),
                     y: .value("Tokens", bucket.tokens)
                 )
                 .foregroundStyle(
@@ -164,24 +173,24 @@ struct HourlyChartView: View {
 
                 // Line
                 LineMark(
-                    x: .value("Hour", hour(of: bucket)),
+                    x: .value("Time", bucket.start),
                     y: .value("Tokens", bucket.tokens)
                 )
                 .foregroundStyle(Color.accentGreen)
                 .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
                 .interpolationMethod(.catmullRom)
 
-                // Current-hour dot with glow (uses Chart's own coordinate system)
-                if hour(of: bucket) == currentHour {
+                // Current-bucket dot with glow (uses Chart's own coordinate system)
+                if bucket.start == currentBucketStart {
                     PointMark(
-                        x: .value("Hour", hour(of: bucket)),
+                        x: .value("Time", bucket.start),
                         y: .value("Tokens", bucket.tokens)
                     )
                     .foregroundStyle(Color.accentGreen.opacity(0.12))
                     .symbolSize(80)
 
                     PointMark(
-                        x: .value("Hour", hour(of: bucket)),
+                        x: .value("Time", bucket.start),
                         y: .value("Tokens", bucket.tokens)
                     )
                     .foregroundStyle(Color.accentGreen)
@@ -190,12 +199,12 @@ struct HourlyChartView: View {
             }
 
             if let hoveredBucket {
-                RuleMark(x: .value("Selected hour", hour(of: hoveredBucket)))
+                RuleMark(x: .value("Selected time", hoveredBucket.start))
                     .foregroundStyle(.secondary.opacity(0.25))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
 
                 PointMark(
-                    x: .value("Selected hour", hour(of: hoveredBucket)),
+                    x: .value("Selected time", hoveredBucket.start),
                     y: .value("Selected tokens", hoveredBucket.tokens)
                 )
                 .foregroundStyle(Color.accentGreen)
@@ -205,7 +214,7 @@ struct HourlyChartView: View {
                 }
             }
         }
-        .chartXScale(domain: 0...23)
+        .chartXScale(domain: xDomain.min...xDomain.max)
         .chartYScale(domain: 0...yAxisUpperBound)
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
@@ -221,14 +230,14 @@ struct HourlyChartView: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: [0, 3, 6, 9, 12, 15, 18, 21]) { value in
-                if let hour = value.as(Int.self) {
+            AxisMarks(values: xAxisValues) { value in
+                if let date = value.as(Date.self) {
                     AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
                         .foregroundStyle(.primary.opacity(0.03))
                     AxisValueLabel {
-                        Text("\(hour)")
-                            .font(.system(size: 9, weight: hour == currentHour ? .semibold : .medium))
-                            .foregroundStyle(timeLabelColor(for: hour))
+                        Text(xAxisLabel(for: date))
+                            .font(.system(size: 9, weight: date == currentBucketStart ? .semibold : .medium))
+                            .foregroundStyle(timeLabelColor(for: date))
                     }
                 }
             }
@@ -241,9 +250,9 @@ struct HourlyChartView: View {
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let location):
-                            updateHoveredHour(at: location, proxy: proxy, geometry: geometry)
+                            updateHoveredBucket(at: location, proxy: proxy, geometry: geometry)
                         case .ended:
-                            hoveredHour = nil
+                            hoveredBucketID = nil
                         }
                     }
             }
@@ -251,41 +260,68 @@ struct HourlyChartView: View {
         .frame(height: 110)
     }
 
-    private func timeLabelColor(for hour: Int) -> Color {
-        if hour == currentHour { return Color.accentGreen }
-        if hour > currentHour { return Color.futureLabelColor }
+    // MARK: - X axis values & labels
+
+    private var xAxisValues: [Date] {
+        switch effectiveRange {
+        case .today:
+            let start = calendar.startOfDay(for: now)
+            return [0, 3, 6, 9, 12, 15, 18, 21].compactMap {
+                calendar.date(byAdding: .hour, value: $0, to: start)
+            }
+        case .threeHours, .oneHour:
+            let step: TimeInterval = effectiveRange == .threeHours ? 60 * 60 : 15 * 60
+            var values: [Date] = []
+            var cursor = xDomain.min
+            while cursor <= xDomain.max {
+                values.append(cursor)
+                cursor = cursor.addingTimeInterval(step)
+            }
+            return values
+        }
+    }
+
+    private func xAxisLabel(for date: Date) -> String {
+        axisFormatter.string(from: date)
+    }
+
+    private func timeLabelColor(for date: Date) -> Color {
+        if date == currentBucketStart { return Color.accentGreen }
+        if date > now { return Color.futureLabelColor }
         return Color.tertiaryLabel
     }
 
-    private func updateHoveredHour(
+    // MARK: - Hover
+
+    private func updateHoveredBucket(
         at location: CGPoint,
         proxy: ChartProxy,
         geometry: GeometryProxy
     ) {
         guard let plotFrame = proxy.plotFrame else {
-            hoveredHour = nil
+            hoveredBucketID = nil
             return
         }
 
         let frame = geometry[plotFrame]
         guard frame.contains(location) else {
-            hoveredHour = nil
+            hoveredBucketID = nil
             return
         }
 
         let plotX = location.x - frame.minX
-        guard let hour: Double = proxy.value(atX: plotX) else {
-            hoveredHour = nil
+        guard let date: Date = proxy.value(atX: plotX) else {
+            hoveredBucketID = nil
             return
         }
 
-        let nearestHour = Int(hour.rounded())
-        hoveredHour = elapsedData.contains { self.hour(of: $0) == nearestHour } ? nearestHour : nil
+        let aligned = UsageBucketAggregator.align(date, to: effectiveRange.bucketMinutes, calendar: calendar)
+        hoveredBucketID = displayBuckets.contains { $0.start == aligned } ? aligned : nil
     }
 
     private func hoverLabel(for bucket: TimeBucket) -> some View {
         VStack(spacing: 1) {
-            Text(String(format: "%02d:00", hour(of: bucket)))
+            Text(bucketLabel(for: bucket))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
             Text("\(formatTokens(bucket.tokens)) tokens")
@@ -299,6 +335,34 @@ struct HourlyChartView: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(.primary.opacity(0.08), lineWidth: 0.5)
         }
+    }
+
+    /// Today buckets are hour-aligned, so "HH:mm" renders "HH:00" there and
+    /// stays correct for sub-hour buckets on fine-grained tabs.
+    private func bucketLabel(for bucket: TimeBucket) -> String {
+        Self.minuteFormatter.string(from: bucket.start)
+    }
+
+    // MARK: - Formatting
+
+    /// Cached POSIX formatters — building a DateFormatter inside axis-label
+    /// closures would repeat on every hover-driven re-render.
+    private static let hourAxisFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "H"
+        return f
+    }()
+
+    private static let minuteFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    private var axisFormatter: DateFormatter {
+        effectiveRange == .today ? Self.hourAxisFormatter : Self.minuteFormatter
     }
 
     // MARK: - Empty state
