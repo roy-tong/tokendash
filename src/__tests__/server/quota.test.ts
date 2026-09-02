@@ -120,6 +120,45 @@ describe('QuotaService', () => {
     expect(snap?.windows.length).toBeGreaterThan(0); // retained from prior success
   });
 
+  it('force refresh returns a new snapshot instead of an older in-flight snapshot', async () => {
+    let releaseFirstFetch!: () => void;
+    let markFirstFetchStarted!: () => void;
+    const firstFetchStarted = new Promise<void>((resolve) => { markFirstFetchStarted = resolve; });
+    const firstFetchBlocked = new Promise<void>((resolve) => { releaseFirstFetch = resolve; });
+    let nextUsedPercent = 10;
+    const adapter = fakeAdapter('codex', 'OpenAI Codex', { configured: true });
+    adapter.fetch = async () => {
+      const usedPercent = nextUsedPercent;
+      nextUsedPercent = 20;
+      if (usedPercent === 10) {
+        markFirstFetchStarted();
+        await firstFetchBlocked;
+      }
+      const snapshot = makeSnapshot('codex', 'OpenAI Codex');
+      snapshot.windows[0] = {
+        ...snapshot.windows[0],
+        usedPercent,
+        remainingPercent: 100 - usedPercent,
+      };
+      return snapshot;
+    };
+    const { service } = buildService([adapter]);
+
+    const ordinaryFetch = service.fetchAll();
+    await firstFetchStarted;
+    const forcedFetch = service.refreshAll();
+    await Promise.resolve();
+    releaseFirstFetch();
+
+    const forced = await forcedFetch;
+    await ordinaryFetch;
+    const current = await service.fetchAll();
+    expect([
+      forced.providers[0]?.windows[0]?.usedPercent,
+      current.providers[0]?.windows[0]?.usedPercent,
+    ]).toEqual([20, 20]);
+  });
+
   it('excludes not-configured providers entirely from the response', async () => {
     const { service } = buildService([
       fakeAdapter('claude', 'Claude Code', { configured: true }),

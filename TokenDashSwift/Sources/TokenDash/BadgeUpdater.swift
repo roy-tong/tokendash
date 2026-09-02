@@ -164,7 +164,13 @@ import AppKit
 
     /// Manual refresh (refresh button) — force everything, including external quota.
     func refreshNow() {
-        Task { await self.performFullUpdate(forceRefresh: true, forceQuota: true) }
+        Task {
+            await self.performFullUpdate(
+                forceRefresh: true,
+                forceQuota: true,
+                replaceQuotaWithLatestResponse: true
+            )
+        }
     }
 
     /// Full detail refresh for the background timer. It bypasses the
@@ -232,7 +238,11 @@ import AppKit
     /// Refreshes daily, blocks, projects, quota, and all derived popover data.
     /// `forceRefresh` bypasses the daemon usage cache; `forceQuota` bypasses
     /// the quota cache for manual and hourly background refreshes.
-    func performFullUpdate(forceRefresh: Bool, forceQuota: Bool) async {
+    func performFullUpdate(
+        forceRefresh: Bool,
+        forceQuota: Bool,
+        replaceQuotaWithLatestResponse: Bool = false
+    ) async {
         guard let api = apiClient else {
             NSLog("[TokenDash] performFullUpdate called but apiClient is nil")
             return
@@ -324,9 +334,12 @@ import AppKit
             // the detail paint. A manual refresh (forceQuota) still awaits so the
             // user sees the result of their explicit refresh.
             if forceQuota {
-                await self.refreshQuota(force: true)
+                await self.refreshQuota(
+                    force: true,
+                    retainPreviousOnFailure: !replaceQuotaWithLatestResponse
+                )
             } else {
-                Task { await self.refreshQuota(force: false) }
+                Task { await self.refreshQuota(force: false, retainPreviousOnFailure: true) }
             }
             // Only a cache-bypassing detail refresh proves the popover is fresh.
             // The launch warm-up intentionally uses refresh=false and may be
@@ -345,15 +358,35 @@ import AppKit
     /// Refresh Coding Plan quotas independently so it never blocks the detail
     /// paint (upstream provider calls can take 1-2s). `force` bypasses the 60s
     /// cache — used by the manual refresh button.
-    private func refreshQuota(force: Bool) async {
+    private func refreshQuota(force: Bool, retainPreviousOnFailure: Bool) async {
         guard let api = apiClient else { return }
         do {
             let quotaResp = try await api.getQuota(refresh: force)
-            let merged = retainUsableQuotas(quotaResp.providers, previous: state.quotas)
-            state.quotas = merged
-            NotificationService.shared.evaluate(quotas: merged)
+            let latest = retainPreviousOnFailure
+                ? retainUsableQuotas(quotaResp.providers, previous: state.quotas)
+                : quotaResp.providers
+            state.quotas = latest
+            NotificationService.shared.evaluate(quotas: latest)
         } catch {
             NSLog("[TokenDash] Quota fetch failed (non-fatal): \(error)")
+            if !retainPreviousOnFailure {
+                let fetchedAt = ISO8601DateFormatter().string(from: now())
+                state.quotas = state.quotas.map { previous in
+                    QuotaSnapshot(
+                        provider: previous.provider,
+                        displayName: previous.displayName,
+                        planName: previous.planName,
+                        fetchedAt: fetchedAt,
+                        freshness: "stale",
+                        windows: [],
+                        status: QuotaProviderStatus(
+                            state: "upstream_unavailable",
+                            message: error.localizedDescription,
+                            category: "transport"
+                        )
+                    )
+                }
+            }
         }
     }
 
