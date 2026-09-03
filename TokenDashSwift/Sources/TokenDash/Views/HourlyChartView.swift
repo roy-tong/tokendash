@@ -239,6 +239,12 @@ struct HourlyChartView: View {
                         Text(xAxisLabel(for: date))
                             .font(.system(size: 9, weight: date == currentBucketStart ? .semibold : .medium))
                             .foregroundStyle(timeLabelColor(for: date))
+                            // Edge ticks sit near the domain boundary, where the
+                            // axis gives the label a slot narrower than "HH:mm"
+                            // and truncates it to "..". fixedSize renders the
+                            // full time past the slot; the offset keeps the
+                            // outer half inside the chart bounds.
+                            .fixedSize(horizontal: true, vertical: false)
                             .offset(x: edgeLabelOffset(for: date))
                     }
                 }
