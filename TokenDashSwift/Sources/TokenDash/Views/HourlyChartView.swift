@@ -239,6 +239,7 @@ struct HourlyChartView: View {
                         Text(xAxisLabel(for: date))
                             .font(.system(size: 9, weight: date == currentBucketStart ? .semibold : .medium))
                             .foregroundStyle(timeLabelColor(for: date))
+                            .offset(x: edgeLabelOffset(for: date))
                     }
                 }
             }
@@ -262,6 +263,16 @@ struct HourlyChartView: View {
     }
 
     // MARK: - X axis values & labels
+
+    /// Fine-grained tabs: the first/last tick labels sit exactly on the plot
+    /// edges, so their outer half gets clipped ("22:4.."). Nudge edge labels
+    /// inward by half a label width; middle labels stay centered on their tick.
+    private func edgeLabelOffset(for date: Date) -> CGFloat {
+        guard effectiveRange != .today else { return 0 }
+        if date == xAxisValues.last { return -13 }
+        if date == xAxisValues.first { return 13 }
+        return 0
+    }
 
     private var xAxisValues: [Date] {
         switch effectiveRange {
