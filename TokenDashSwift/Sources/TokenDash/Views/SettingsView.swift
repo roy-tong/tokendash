@@ -83,7 +83,9 @@ struct SettingsView: View {
                             Text(interval.label).tag(interval)
                         }
                     }
-                    .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
+                    .pickerStyle(.menu).controlSize(.small).labelsHidden()
+                    .fixedSize()
+                    .frame(width: 150, alignment: .trailing)
                     .onChange(of: settings.refreshInterval) { _, _ in
                         state.badgeUpdater?.applyRefreshIntervalChange()
                     }
@@ -94,7 +96,9 @@ struct SettingsView: View {
                             Text(range.label).tag(range)
                         }
                     }
-                    .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
+                    .pickerStyle(.menu).controlSize(.small).labelsHidden()
+                    .fixedSize()
+                    .frame(width: 150, alignment: .trailing)
                 }
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", showDivider: false) {
                     Picker("", selection: $settings.appearance) {
@@ -102,7 +106,9 @@ struct SettingsView: View {
                             Text(a.label).tag(a)
                         }
                     }
-                    .pickerStyle(.menu).controlSize(.small).frame(width: 150).labelsHidden()
+                    .pickerStyle(.menu).controlSize(.small).labelsHidden()
+                    .fixedSize()
+                    .frame(width: 150, alignment: .trailing)
                 }
             }
         }
