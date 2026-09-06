@@ -1,22 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { getFiveMinKey, coarsenBucketKey } from '../../server/claudeJsonlParser.js';
-import { getFiveMinKey as codexFiveMinKey, coarsenBucketKey as codexCoarsen } from '../../server/codexParser.js';
-import { getFiveMinKey as piFiveMinKey, coarsenBucketKey as piCoarsen } from '../../server/piParser.js';
+import { getMinuteKey, coarsenBucketKey } from '../../server/claudeJsonlParser.js';
+import { getMinuteKey as codexMinuteKey, coarsenBucketKey as codexCoarsen } from '../../server/codexParser.js';
+import { getMinuteKey as piMinuteKey, coarsenBucketKey as piCoarsen } from '../../server/piParser.js';
 
-describe('claude getFiveMinKey', () => {
-  it('converts UTC timestamp to Asia/Shanghai 5-min key', () => {
-    // 2026-04-15T08:03:17Z = 16:03:17 in UTC+8 → floor to 16:00
-    expect(getFiveMinKey('2026-04-15T08:03:17.000Z', 'Asia/Shanghai')).toBe('2026-04-15T16:00');
+describe('claude getMinuteKey', () => {
+  it('converts UTC timestamp to Asia/Shanghai minute key', () => {
+    // 2026-04-15T08:03:17Z = 16:03:17 in UTC+8
+    expect(getMinuteKey('2026-04-15T08:03:17.000Z', 'Asia/Shanghai')).toBe('2026-04-15T16:03');
   });
 
-  it('floors minutes to 5-minute boundaries', () => {
-    // 08:07:59Z = 16:07:59+8 → 16:05
-    expect(getFiveMinKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15T16:05');
+  it('keeps the exact minute without flooring', () => {
+    expect(getMinuteKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15T16:07');
   });
 
   it('rolls over to next day after midnight Shanghai time', () => {
-    // 2026-04-15T16:02:00Z = 2026-04-16 00:02+8 → 00:00
-    expect(getFiveMinKey('2026-04-15T16:02:00.000Z', 'Asia/Shanghai')).toBe('2026-04-16T00:00');
+    // 2026-04-15T16:02:00Z = 2026-04-16 00:02+8
+    expect(getMinuteKey('2026-04-15T16:02:00.000Z', 'Asia/Shanghai')).toBe('2026-04-16T00:02');
   });
 });
 
@@ -27,14 +26,17 @@ describe('claude coarsenBucketKey', () => {
   it('15m granularity floors to quarter hour', () => {
     expect(coarsenBucketKey('2026-04-15T16:35', '15m')).toBe('2026-04-15T16:30');
   });
-  it('5m granularity returns key unchanged', () => {
-    expect(coarsenBucketKey('2026-04-15T16:35', '5m')).toBe('2026-04-15T16:35');
+  it('5m granularity floors to the 5-minute grid', () => {
+    expect(coarsenBucketKey('2026-04-15T16:37', '5m')).toBe('2026-04-15T16:35');
+  });
+  it('1m granularity returns the key unchanged', () => {
+    expect(coarsenBucketKey('2026-04-15T16:37', '1m')).toBe('2026-04-15T16:37');
   });
 });
 
-describe('codex 5-min keys (space-separated key family)', () => {
-  it('produces 5-min key floored at Shanghai tz', () => {
-    expect(codexFiveMinKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15 16:05');
+describe('codex minute keys (space-separated key family)', () => {
+  it('produces exact minute key at Shanghai tz', () => {
+    expect(codexMinuteKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15 16:07');
   });
   it('coarsens to hour with space separator', () => {
     expect(codexCoarsen('2026-04-15 16:35', 'hour')).toBe('2026-04-15 16');
@@ -44,9 +46,9 @@ describe('codex 5-min keys (space-separated key family)', () => {
   });
 });
 
-describe('pi 5-min keys', () => {
-  it('floors to 5-min at Shanghai tz', () => {
-    expect(piFiveMinKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15 16:05');
+describe('pi minute keys', () => {
+  it('keeps the exact minute at Shanghai tz', () => {
+    expect(piMinuteKey('2026-04-15T08:07:59.000Z', 'Asia/Shanghai')).toBe('2026-04-15 16:07');
   });
   it('coarsens to 15m', () => {
     expect(piCoarsen('2026-04-15 16:35', '15m')).toBe('2026-04-15 16:30');

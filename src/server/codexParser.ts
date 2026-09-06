@@ -57,7 +57,7 @@ export interface ParsedSession {
 }
 
 export interface AggregateOptions {
-  groupBy: 'day' | 'hour' | 'fivemin' | 'month' | 'session' | 'project';
+  groupBy: 'day' | 'hour' | 'onemin' | 'month' | 'session' | 'project';
   project?: string | null;
   since?: Date | null;
   until?: Date | null;
@@ -80,7 +80,7 @@ interface AggregateBucket {
   models: Map<string, TokenAccumulator>;
 }
 
-const CODEX_INDEX_VERSION = 'codex-session-v6-5min';
+const CODEX_INDEX_VERSION = 'codex-session-v7-1min';
 const DEFAULT_TZ = 'Asia/Shanghai';
 
 interface SerializedAggregateBucket {
@@ -444,7 +444,7 @@ function summarizeCodexSession(session: ParsedSession | null): CodexFileAggregat
   for (const ev of session.tokenEvents) {
     const model = ev.model || session.model;
     const dayKey = getDateKey(ev.timestamp, DEFAULT_TZ);
-    const bucketKey = getFiveMinKey(ev.timestamp, DEFAULT_TZ);
+    const bucketKey = getMinuteKey(ev.timestamp, DEFAULT_TZ);
 
     addAccToSerializedBucket(bucketFor(summary.daily, dayKey), ev, model);
     addAccToSerializedBucket(bucketFor(summary.blocks, bucketKey), ev, model);
@@ -502,25 +502,26 @@ function getHourKey(ts: string, tz: string): string {
 
 // Re-declared locally (same values as the Claude parser) to avoid a runtime
 // dependency beyond the type-only import above.
-const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5 };
+const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5, '1m': 1 };
 
 /** Bucket key at a fixed 5-minute granularity ('yyyy-MM-dd HH:mm'), the fine base the index layer always stores. */
-export function getFiveMinKey(ts: string, tz: string): string {
+export function getMinuteKey(ts: string, tz: string): string {
   const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
   const d = new Date(new Date(ts).getTime() + offset);
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   const hh = String(d.getUTCHours()).padStart(2, '0');
-  const minute = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  const minute = String(d.getUTCMinutes()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} ${hh}:${minute}`;
 }
 
 /** Coarsen a 5-min bucket key ('yyyy-MM-dd HH:mm') up to the requested granularity ('hour' yields 'yyyy-MM-dd HH'). */
 export function coarsenBucketKey(key: string, granularity: BlockGranularity): string {
-  if (granularity === '5m') return key;
+  if (granularity === '1m') return key;
   if (granularity === 'hour') return key.slice(0, 13);   // 'yyyy-MM-dd HH'
-  const minute = String(Math.floor(Number(key.slice(14, 16)) / 15) * 15).padStart(2, '0');
+  const minutes = GRANULARITY_MINUTES[granularity];
+  const minute = String(Math.floor(Number(key.slice(14, 16)) / minutes) * minutes).padStart(2, '0');
   return `${key.slice(0, 14)}${minute}`;
 }
 
@@ -680,7 +681,7 @@ function groupSessions(
       let key: string;
       switch (options.groupBy) {
         case 'hour':   key = getHourKey(ev.timestamp, tz); break;
-        case 'fivemin': key = getFiveMinKey(ev.timestamp, tz); break;
+        case 'onemin': key = getMinuteKey(ev.timestamp, tz); break;
         case 'month':  key = getMonthKey(ev.timestamp, tz); break;
         case 'session': key = session.id; break;
         case 'project': key = extractProjectName(session.cwd); break;
@@ -789,7 +790,13 @@ function buildBlocksResponseFromSummaries(
   }
 
   const granMinutes = GRANULARITY_MINUTES[granularity];
+  // 1-minute responses cover only the trailing 15 minutes — the realtime tab
+  // polls every 60s and must not pull the full minute-level history.
+  const windowStartKey = granularity === '1m'
+    ? getMinuteKey(new Date(Date.now() - 15 * 60_000).toISOString(), DEFAULT_TZ)
+    : '';
   const blocks: BlockEntry[] = Object.entries(blockBuckets)
+    .filter(([key]) => !windowStartKey || key >= windowStartKey)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, bucket], idx) => {
       const { acc, models } = toAggregateBucket(bucket);
@@ -923,7 +930,7 @@ function buildBlocksResponse(
   options?: Partial<AggregateOptions> & { granularity?: BlockGranularity },
 ): BlocksResponse {
   const granularity = options?.granularity ?? 'hour';
-  const grouped = groupSessions(sessions, { groupBy: 'fivemin', ...options });
+  const grouped = groupSessions(sessions, { groupBy: 'onemin', ...options });
 
   const blockBuckets = new Map<string, AggregateBucket>();
   for (const [key, bucket] of grouped) {
@@ -933,7 +940,13 @@ function buildBlocksResponse(
   }
 
   const granMinutes = GRANULARITY_MINUTES[granularity];
+  // 1-minute responses cover only the trailing 15 minutes — the realtime tab
+  // polls every 60s and must not pull the full minute-level history.
+  const windowStartKey = granularity === '1m'
+    ? getMinuteKey(new Date(Date.now() - 15 * 60_000).toISOString(), DEFAULT_TZ)
+    : '';
   const blocks: BlockEntry[] = [...blockBuckets.entries()]
+    .filter(([key]) => !windowStartKey || key >= windowStartKey)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, { acc, models }], idx) => {
       const cost = buildModelBreakdowns(models).reduce((sum, model) => sum + model.cost, 0);

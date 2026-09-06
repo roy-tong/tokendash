@@ -18,7 +18,7 @@ import { type BlockGranularity } from './claudeJsonlParser.js';
 //                    以及 message.model / message.provider
 // ---------------------------------------------------------------------------
 
-const PI_INDEX_VERSION = 'pi-session-v2-5min';
+const PI_INDEX_VERSION = 'pi-session-v3-1min';
 const DEFAULT_TZ = 'Asia/Shanghai';
 
 // ---------------------------------------------------------------------------
@@ -229,25 +229,26 @@ function getHourKey(ts: string, tz: string): string {
 
 // Re-declared locally (same values as the Claude parser) to avoid a runtime
 // dependency beyond the type-only import above.
-const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5 };
+const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5, '1m': 1 };
 
 /** Bucket key at a fixed 5-minute granularity ('yyyy-MM-dd HH:mm'), the fine base the index layer always stores. */
-export function getFiveMinKey(ts: string, tz: string): string {
+export function getMinuteKey(ts: string, tz: string): string {
   const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
   const d = new Date(new Date(ts).getTime() + offset);
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   const hh = String(d.getUTCHours()).padStart(2, '0');
-  const minute = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  const minute = String(d.getUTCMinutes()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd} ${hh}:${minute}`;
 }
 
 /** Coarsen a 5-min bucket key ('yyyy-MM-dd HH:mm') up to the requested granularity ('hour' yields 'yyyy-MM-dd HH'). */
 export function coarsenBucketKey(key: string, granularity: BlockGranularity): string {
-  if (granularity === '5m') return key;
+  if (granularity === '1m') return key;
   if (granularity === 'hour') return key.slice(0, 13);   // 'yyyy-MM-dd HH'
-  const minute = String(Math.floor(Number(key.slice(14, 16)) / 15) * 15).padStart(2, '0');
+  const minutes = GRANULARITY_MINUTES[granularity];
+  const minute = String(Math.floor(Number(key.slice(14, 16)) / minutes) * minutes).padStart(2, '0');
   return `${key.slice(0, 14)}${minute}`;
 }
 
@@ -321,7 +322,7 @@ function accToEntry(date: string, acc: TokenAccumulator, modelAccs: Map<string, 
 
 function groupSessions(
   sessions: PiSession[],
-  groupBy: 'day' | 'hour' | 'project' | 'fivemin',
+  groupBy: 'day' | 'hour' | 'project' | 'onemin',
   tz: string,
   projectFilter?: string | null,
 ): Map<string, AggregateBucket> {
@@ -335,8 +336,8 @@ function groupSessions(
       let key: string;
       if (groupBy === 'hour') {
         key = getHourKey(ev.timestamp, tz);
-      } else if (groupBy === 'fivemin') {
-        key = getFiveMinKey(ev.timestamp, tz);
+      } else if (groupBy === 'onemin') {
+        key = getMinuteKey(ev.timestamp, tz);
       } else if (groupBy === 'project') {
         key = projectName;
       } else {
@@ -423,7 +424,7 @@ export function getBlocksResponse(options?: { project?: string | null; timezone?
 
   // Group at a fixed 5-min base, then coarsen to the target granularity so the
   // on-disk index stays decoupled from the requested bucket size.
-  const grouped = groupSessions(sessions, 'fivemin', tz, options?.project);
+  const grouped = groupSessions(sessions, 'onemin', tz, options?.project);
 
   const blockBuckets = new Map<string, AggregateBucket>();
   for (const [key, bucket] of grouped) {
@@ -433,7 +434,13 @@ export function getBlocksResponse(options?: { project?: string | null; timezone?
   }
 
   const granMinutes = GRANULARITY_MINUTES[granularity];
+  // 1-minute responses cover only the trailing 15 minutes — the realtime tab
+  // polls every 60s and must not pull the full minute-level history.
+  const windowStartKey = granularity === '1m'
+    ? getMinuteKey(new Date(Date.now() - 15 * 60_000).toISOString(), DEFAULT_TZ)
+    : '';
   const blocks: BlockEntry[] = [...blockBuckets.entries()]
+    .filter(([key]) => !windowStartKey || key >= windowStartKey)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, { acc, models }], idx) => {
       const [datePart, timePart] = key.split(' ');

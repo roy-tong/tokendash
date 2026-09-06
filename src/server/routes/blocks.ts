@@ -9,8 +9,14 @@ import { getBlocksResponse as getClaudeBlocksResponse } from '../claudeJsonlPars
 import { getBlocksResponse as getPiBlocksResponse } from '../piParser.js';
 
 function parseGranularity(raw: unknown): BlockGranularity {
-  return raw === '15m' || raw === '5m' ? raw : 'hour';   // invalid values fall back to hour
+  return raw === '15m' || raw === '5m' || raw === '1m' ? raw : 'hour';   // invalid values fall back to hour
 }
+
+/// Realtime buckets go stale in a minute, so the 1m key re-scans at most once
+/// per minute instead of sitting out the default 5-minute TTL.
+const GRANULARITY_TTL_MS: Record<BlockGranularity, number> = {
+  hour: 5 * 60_000, '15m': 5 * 60_000, '5m': 5 * 60_000, '1m': 60_000,
+};
 
 export async function getBlocks(req: Request, res: Response): Promise<void> {
   const agent = req.query.agent as string || 'claude';
@@ -37,7 +43,7 @@ export async function getBlocks(req: Request, res: Response): Promise<void> {
     }
 
     const data = await fetchBlocksData(agent, project, granularity);
-    cache.set(cacheKey, data);
+    cache.set(cacheKey, data, GRANULARITY_TTL_MS[granularity]);
     res.json(data);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -71,6 +77,6 @@ function refreshBlocksCache(
   granularity: BlockGranularity,
 ): void {
   Promise.resolve()
-    .then(async () => { const data = await fetchBlocksData(agent, project, granularity); cache.set(cacheKey, data); })
+    .then(async () => { const data = await fetchBlocksData(agent, project, granularity); cache.set(cacheKey, data, GRANULARITY_TTL_MS[granularity]); })
     .catch(err => console.error('Background refresh failed (blocks):', err));
 }

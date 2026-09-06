@@ -103,7 +103,7 @@ interface ClaudeFileAggregate {
 // ---------------------------------------------------------------------------
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-const CLAUDE_INDEX_VERSION = 'claude-aggregate-v2-5min';
+const CLAUDE_INDEX_VERSION = 'claude-aggregate-v3-1min';
 
 const projectNameCache = new Map<string, string>();
 
@@ -230,7 +230,7 @@ function parseClaudeUsageFile(file: ClaudeUsageFileRef): ClaudeFileAggregate {
       cacheReadTokens,
     };
     const dayKey = getDateKey(timestamp, DEFAULT_TZ);
-    const bucketKey = getFiveMinKey(timestamp, DEFAULT_TZ);
+    const bucketKey = getMinuteKey(timestamp, DEFAULT_TZ);
 
     addUsageToBucket(claudeBucketFor(summary.daily, dayKey), parsedUsage);
     addUsageToBucket(claudeBucketFor(summary.blocks, bucketKey), parsedUsage);
@@ -286,29 +286,30 @@ export function getHourKey(timestamp: string, tz: string): string {
   return `${yyyy}-${mm}-${dd}T${hh}`;
 }
 
-export type BlockGranularity = 'hour' | '15m' | '5m';
+export type BlockGranularity = 'hour' | '15m' | '5m' | '1m';
 
-const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5 };
+const GRANULARITY_MINUTES: Record<BlockGranularity, number> = { hour: 60, '15m': 15, '5m': 5, '1m': 1 };
 
-/// Bucket key at a fixed 5-minute granularity — the parse/index layer always
+/// Bucket key at a fixed 1-minute granularity — the parse/index layer always
 /// produces this fine base so cached summaries stay granularity-agnostic.
-export function getFiveMinKey(timestamp: string, tz: string): string {
+export function getMinuteKey(timestamp: string, tz: string): string {
   const offset = (TZ_OFFSETS[tz] ?? 8) * 3_600_000;
   const d = new Date(new Date(timestamp).getTime() + offset);
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   const hh = String(d.getUTCHours()).padStart(2, '0');
-  const minute = String(Math.floor(d.getUTCMinutes() / 5) * 5).padStart(2, '0');
+  const minute = String(d.getUTCMinutes()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}T${hh}:${minute}`;
 }
 
-/// Coarsen a 5-min bucket key ('yyyy-MM-ddTHH:mm') up to the requested
+/// Coarsen a 1-minute bucket key ('yyyy-MM-ddTHH:mm') up to the requested
 /// granularity. 'hour' yields the legacy getHourKey format ('yyyy-MM-ddTHH').
 export function coarsenBucketKey(key: string, granularity: BlockGranularity): string {
-  if (granularity === '5m') return key;
+  if (granularity === '1m') return key;
   if (granularity === 'hour') return key.slice(0, 13);   // 'yyyy-MM-ddTHH'
-  const minute = String(Math.floor(Number(key.slice(14, 16)) / 15) * 15).padStart(2, '0');
+  const minutes = GRANULARITY_MINUTES[granularity];
+  const minute = String(Math.floor(Number(key.slice(14, 16)) / minutes) * minutes).padStart(2, '0');
   return `${key.slice(0, 14)}${minute}`;
 }
 
@@ -490,17 +491,23 @@ export function getBlocksResponse(
   tz = DEFAULT_TZ,
   granularity: BlockGranularity = 'hour',
 ): { blocks: BlockEntry[] } {
-  const fiveMinBuckets: Record<string, ClaudeAggregateBucket> = {};
+  const minuteBuckets: Record<string, ClaudeAggregateBucket> = {};
 
   for (const summary of loadClaudeAggregates()) {
     const source = project ? summary.projectBlocks[extractProjectName(project)] || {} : summary.blocks;
     for (const [key, bucket] of Object.entries(source)) {
-      mergeClaudeBucket(claudeBucketFor(fiveMinBuckets, coarsenBucketKey(key, granularity)), bucket);
+      mergeClaudeBucket(claudeBucketFor(minuteBuckets, coarsenBucketKey(key, granularity)), bucket);
     }
   }
 
   const granMinutes = GRANULARITY_MINUTES[granularity];
-  const blocks: BlockEntry[] = Object.entries(fiveMinBuckets)
+  // 1-minute responses cover only the trailing 15 minutes — the realtime tab
+  // polls every 60s and must not pull the full minute-level history.
+  const windowStartKey = granularity === '1m'
+    ? getMinuteKey(new Date(Date.now() - 15 * 60_000).toISOString(), tz)
+    : '';
+  const blocks: BlockEntry[] = Object.entries(minuteBuckets)
+    .filter(([key]) => !windowStartKey || key >= windowStartKey)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, bucket], idx) => ({
       id: `claude-${idx}`,

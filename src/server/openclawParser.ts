@@ -444,7 +444,7 @@ export function getBlocksResponse(options?: OpenClawAggregateOptions & { granula
   const sessions = parseAllOpenClawSessions();
   const tz = options?.timezone || 'Asia/Shanghai';
   const granularity = options?.granularity ?? 'hour';
-  const granMinutes = granularity === 'hour' ? 60 : granularity === '15m' ? 15 : 5;
+  const granMinutes = granularity === 'hour' ? 60 : granularity === '15m' ? 15 : granularity === '5m' ? 5 : 1;
 
   // No persistent index here — sessions are re-parsed per request, so bucket
   // directly at the target granularity.
@@ -466,10 +466,13 @@ export function getBlocksResponse(options?: OpenClawAggregateOptions & { granula
     }
   }
 
+  // 1-minute responses cover only the trailing 15 minutes for the realtime tab.
+  const windowStartMs = granularity === '1m' ? Date.now() - 15 * 60_000 : 0;
   const blocks: BlockEntry[] = [];
   let idx = 0;
 
   for (const [bucketKey, { acc, models }] of grouped) {
+    if (windowStartMs && Date.parse(`${bucketKey.replace(' ', 'T')}:00`) < windowStartMs) continue;
     const [datePart, timePart] = bucketKey.split(' ');
     const hour = timePart.slice(0, 2);
     blocks.push({
