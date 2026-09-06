@@ -1,5 +1,9 @@
 # Changelog
 
+### v1.8.10
+- **Cache-aligned automatic refreshes** — keep web timers, native background refreshes, popover opens, and optional pulse sampling on cache-aware requests; only an explicit manual refresh bypasses usage and quota caches.
+- **Faster OpenCode dashboard loading** — share one parsed event set across daily, project, and block aggregations until the SQLite database or its WAL changes, avoiding repeated multi-second full-table scans.
+- **Reliable native Dashboard links** — verify that a reused local daemon serves the web dashboard, not just compatible APIs, before opening it from the menu bar app.
 ### v1.9.0 (unreleased)
 - **Responsive daemon during Codex scans** — move heavy Codex usage parsing into a sidecar worker so a cold index rebuild or large transcript scan no longer blocks the daemon's HTTP event loop, keeping cheap endpoints like `/api/app-info` instant while identical in-flight Codex requests coalesce and share a short-lived result cache (from PR #35).
 - **Hourly chart time ranges** — pick between Today (hourly buckets), Last 3 Hours (15-minute buckets), and Last Hour (5-minute buckets) from new chart-header tabs or Settings → General → Hourly Chart; tab switches persist as the default range, fine-grained tabs tighten the popover-open refresh throttle to 5 minutes, and quiet windows render as zero lines instead of empty states.

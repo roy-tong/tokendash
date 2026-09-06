@@ -166,18 +166,15 @@ import AppKit
     func refreshNow() {
         Task {
             await self.performFullUpdate(
-                forceRefresh: true,
-                forceQuota: true,
-                replaceQuotaWithLatestResponse: true
-            )
+                forceRefresh: true, forceQuota: true, recordRefreshTime: true)
         }
     }
 
-    /// Full detail refresh for the background timer. It bypasses the
-    /// daemon and quota caches so a closed popover still has current content
-    /// when the user next opens it.
+    /// Full detail refresh for the background timer. Automatic work remains
+    /// cache-aware; only the user's refresh action bypasses daemon caches.
     func performBackgroundRefresh() async {
-        await performFullUpdate(forceRefresh: true, forceQuota: true)
+        await performFullUpdate(
+            forceRefresh: false, forceQuota: false, recordRefreshTime: true)
     }
 
     /// Returns true when opening the popover triggered its allowed automatic
@@ -197,7 +194,8 @@ import AppKit
            currentTime.timeIntervalSince(lastUpdatedAt) < throttle {
             return false
         }
-        await performFullUpdate(forceRefresh: true, forceQuota: false)
+        await performFullUpdate(
+            forceRefresh: false, forceQuota: false, recordRefreshTime: true)
         return true
     }
 
@@ -240,17 +238,20 @@ import AppKit
 
     /// Refreshes daily, blocks, projects, quota, and all derived popover data.
     /// `forceRefresh` bypasses the daemon usage cache; `forceQuota` bypasses
-    /// the quota cache for manual and hourly background refreshes.
+    /// the quota cache. Both are reserved for an explicit manual refresh.
+    /// `recordRefreshTime` lets cache-aware scheduled work advance its throttle
+    /// without treating the launch warm-up as a completed automatic refresh.
     func performFullUpdate(
         forceRefresh: Bool,
         forceQuota: Bool,
-        replaceQuotaWithLatestResponse: Bool = false
+        recordRefreshTime: Bool? = nil
     ) async {
         guard let api = apiClient else {
             NSLog("[TokenDash] performFullUpdate called but apiClient is nil")
             return
         }
         guard !state.isRefreshing else { return }
+        let shouldRecordRefreshTime = recordRefreshTime ?? forceRefresh
         state.isRefreshing = true
         if state.todaySummary == nil {
             state.isLoading = true
@@ -258,7 +259,7 @@ import AppKit
         defer {
             state.isLoading = false
             state.isRefreshing = false
-            if forceRefresh {
+            if shouldRecordRefreshTime {
                 pendingFreshPopoverRefresh = false
             } else if pendingFreshPopoverRefresh && mode == .active {
                 pendingFreshPopoverRefresh = false
@@ -314,7 +315,7 @@ import AppKit
             // view rather than show an empty chart. The next refresh replaces it.
             // Only retain data of the SAME granularity — an empty fine-grained
             // rolling window is a legitimate state (quiet hours) and must show
-            // as a zero line, not freeze the previous Today buckets forever.
+            // as a zero line, not freeze the previous buckets forever.
             let sameGranularity = state.hourlyData.first?.minutes == computedBuckets.first?.minutes
             let hourly = (computedBuckets.allSatisfy { $0.tokens == 0 }
                           && sameGranularity
@@ -346,19 +347,14 @@ import AppKit
             // the detail paint. A manual refresh (forceQuota) still awaits so the
             // user sees the result of their explicit refresh.
             if forceQuota {
-                await self.refreshQuota(
-                    force: true,
-                    retainPreviousOnFailure: !replaceQuotaWithLatestResponse
-                )
+                await self.refreshQuota(force: true)
             } else {
-                Task { await self.refreshQuota(force: false, retainPreviousOnFailure: true) }
+                Task { await self.refreshQuota(force: false) }
             }
-            // Only a cache-bypassing detail refresh proves the popover is fresh.
-            // The launch warm-up intentionally uses refresh=false and may be
-            // served from the daemon's stale disk cache; recording it here would
-            // suppress the first popover-open refresh and leave the menu showing
-            // zeroes until the next background/manual refresh.
-            if forceRefresh {
+            // Launch warm-up intentionally does not advance the throttle. Timed,
+            // popover, and manual refreshes do, even when the automatic paths are
+            // cache-served.
+            if shouldRecordRefreshTime {
                 self.state.lastUpdatedAt = now()
             }
         } catch {
@@ -370,43 +366,22 @@ import AppKit
     /// Refresh Coding Plan quotas independently so it never blocks the detail
     /// paint (upstream provider calls can take 1-2s). `force` bypasses the 60s
     /// cache — used by the manual refresh button.
-    private func refreshQuota(force: Bool, retainPreviousOnFailure: Bool) async {
+    private func refreshQuota(force: Bool) async {
         guard let api = apiClient else { return }
         do {
             let quotaResp = try await api.getQuota(refresh: force)
-            let latest = retainPreviousOnFailure
-                ? retainUsableQuotas(quotaResp.providers, previous: state.quotas)
-                : quotaResp.providers
-            state.quotas = latest
-            NotificationService.shared.evaluate(quotas: latest)
+            let merged = retainUsableQuotas(quotaResp.providers, previous: state.quotas)
+            state.quotas = merged
+            NotificationService.shared.evaluate(quotas: merged)
         } catch {
             NSLog("[TokenDash] Quota fetch failed (non-fatal): \(error)")
-            if !retainPreviousOnFailure {
-                let fetchedAt = ISO8601DateFormatter().string(from: now())
-                state.quotas = state.quotas.map { previous in
-                    QuotaSnapshot(
-                        provider: previous.provider,
-                        displayName: previous.displayName,
-                        planName: previous.planName,
-                        fetchedAt: fetchedAt,
-                        freshness: "stale",
-                        windows: [],
-                        status: QuotaProviderStatus(
-                            state: "upstream_unavailable",
-                            message: error.localizedDescription,
-                            category: "transport"
-                        )
-                    )
-                }
-            }
         }
     }
 
     // MARK: - Pulse sampling (active only)
 
-    /// Samples today's cumulative token count every activePulseInterval. refresh:true
-    /// because rate deltas need fresh totals (a cache-served value would freeze the
-    /// rate chart at zero). Only scheduled in `.active`.
+    /// Samples today's cumulative token count every activePulseInterval. This
+    /// optional automatic path remains cache-aware like all non-manual refreshes.
     private func samplePulse() {
         guard let api = apiClient, !isPulseSampling else { return }
         isPulseSampling = true
@@ -425,7 +400,7 @@ import AppKit
                 var totalTokens = 0, inputTokens = 0, outputTokens = 0, ok = 0
                 for agent in agents {
                     do {
-                        let r = try await api.getDaily(agent: agent, refresh: true)
+                        let r = try await api.getDaily(agent: agent, refresh: false)
                         if let e = r.daily.first(where: { $0.date == today }) {
                             totalTokens += e.totalTokens
                             inputTokens += e.inputTokens
