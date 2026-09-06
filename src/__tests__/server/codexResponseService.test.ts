@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getCodexDailyResponse, resolveCodexWorkerPath } from '../../server/codexResponseService.js';
+import { getCodexBlocksResponse, getCodexDailyResponse, resolveCodexWorkerPath } from '../../server/codexResponseService.js';
 import { cache } from '../../server/cache.js';
 import { clearUsageFileIndexMemory } from '../../server/usageFileIndex.js';
 
@@ -93,5 +93,30 @@ describe('codex response worker', () => {
 
     expect(dirname(worker)).toBe('/tmp/tokendash/dist/server');
     expect(worker.endsWith('codexResponseWorker.js')).toBe(true);
+  });
+
+  it('keeps fine-grained block requests off the hourly bundle cache', async () => {
+    // An event at 08:07 Shanghai time lands in different buckets per
+    // granularity (hour -> 08:00, 5m -> 08:05), so a shared cache key or a
+    // bundle hit would surface the wrong startTime here.
+    const sessionDir = join(process.env.CODEX_HOME!, 'sessions', '2026', '09', '02');
+    writeFileSync(join(sessionDir, 'rollout-granularity.jsonl'), [
+      {
+        type: 'session_meta',
+        payload: { id: 'granularity-session', cwd: '/tmp/project-b', timestamp: '2026-09-02T00:00:00.000Z' },
+      },
+      { type: 'turn_context', payload: { model: 'gpt-5.5' } },
+      tokenCount('2026-09-02T00:07:31.000Z', 300),
+    ].map(line => JSON.stringify(line)).join('\n'));
+
+    const hourly = await getCodexBlocksResponse();
+    const hourly0800 = hourly.blocks.find(b => b.startTime === '2026-09-02T08:00:00');
+    expect(hourly0800?.totalTokens).toBe(475, 'hourly: 175 (shared fixture) + 300 merged into 08:00');
+
+    const fine = await getCodexBlocksResponse({ granularity: '5m' });
+    const fine0805 = fine.blocks.find(b => b.startTime === '2026-09-02T08:05:00');
+    expect(fine0805?.totalTokens).toBe(300, '5m: the 08:07 event lands alone in the 08:05 bucket');
+    const fine0800 = fine.blocks.find(b => b.startTime === '2026-09-02T08:00:00');
+    expect(fine0800?.totalTokens).toBe(175, '5m: the shared fixture stays in its own 08:00 bucket');
   });
 });
