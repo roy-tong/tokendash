@@ -201,6 +201,10 @@ function parseClaudeUsageFile(file: ClaudeUsageFileRef): ClaudeFileAggregate {
     return summary;
   }
   const projectName = extractProjectName(file.projectDir);
+  // Claude Code writes one JSONL line per content block of the same assistant
+  // message, each carrying the same message.id and the same usage snapshot.
+  // Deduplicate by message.id so multi-block messages are counted once.
+  const seenMessageIds = new Set<string>();
 
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
@@ -211,6 +215,11 @@ function parseClaudeUsageFile(file: ClaudeUsageFileRef): ClaudeFileAggregate {
 
     if (obj.type !== 'assistant' || !obj.message) continue;
     const msg = obj.message as Record<string, unknown>;
+    const messageId = typeof msg.id === 'string' ? msg.id : null;
+    if (messageId !== null) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
     const usage = (msg.usage as Record<string, number>) || {};
 
     const inputTokens = usage.input_tokens || 0;

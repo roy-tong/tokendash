@@ -634,6 +634,10 @@ function claudeSessionsFromFile(filepath: string): MutableClaudeSession[] {
   const fallbackId = basename(filepath, '.jsonl');
   const sessions = new Map<string, MutableClaudeSession>();
   const toolNames = new Map<string, { name: string; isSkill: boolean }>();
+  // Claude Code emits one JSONL line per content block of the same assistant
+  // message, each carrying the same message.id and usage snapshot; count each
+  // message once.
+  const seenMessageIds = new Set<string>();
 
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
@@ -700,6 +704,11 @@ function claudeSessionsFromFile(filepath: string): MutableClaudeSession[] {
     if (entry.type !== 'assistant') continue;
     const message = entry.message as Record<string, unknown> | undefined;
     if (!message) continue;
+    const messageId = typeof message.id === 'string' ? message.id : null;
+    if (messageId !== null) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
+    }
     const model = typeof message.model === 'string' ? message.model : 'unknown';
     const usage = (message.usage ?? {}) as Record<string, unknown>;
     const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
