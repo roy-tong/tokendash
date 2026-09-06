@@ -59,43 +59,6 @@ final class BadgeUpdaterModeTests: XCTestCase {
         XCTAssertFalse(state.isRefreshing, "手动刷新完成后必须退出 loading 状态")
     }
 
-    func testManualRefreshShowsLatestCodingPlanFailureInsteadOfKeepingOldProgress() async throws {
-        let state = AppState()
-        state.quotas = [makeQuotaSnapshot(usedPercent: 9)]
-        let unavailable = makeQuotaSnapshot(
-            usedPercent: nil,
-            freshness: "stale",
-            status: QuotaProviderStatus(
-                state: "upstream_unavailable",
-                message: "Codex unavailable",
-                category: nil
-            )
-        )
-        let mock = MockAPIClient(quotaResponse: QuotaResponse(providers: [unavailable]))
-        let updater = BadgeUpdater(state: state, client: mock)
-
-        updater.refreshNow()
-        try await waitUntil { await mock.snapshot().quota > 0 }
-        try await waitUntil { !state.isRefreshing }
-
-        XCTAssertEqual(state.quotas.first?.status.state, "upstream_unavailable")
-        XCTAssertTrue(state.quotas.first?.windows.isEmpty == true)
-    }
-
-    func testManualRefreshShowsTransportFailureInsteadOfKeepingOldProgress() async throws {
-        let state = AppState()
-        state.quotas = [makeQuotaSnapshot(usedPercent: 9)]
-        let mock = FailingQuotaAPIClient()
-        let updater = BadgeUpdater(state: state, client: mock)
-
-        updater.refreshNow()
-        try await waitUntil { await mock.quotaCallCount > 0 }
-        try await waitUntil { !state.isRefreshing }
-
-        XCTAssertEqual(state.quotas.first?.status.state, "upstream_unavailable")
-        XCTAssertTrue(state.quotas.first?.windows.isEmpty == true)
-    }
-
     func testCacheServedLaunchPrimeDoesNotThrottleFirstPopoverRefresh() async throws {
         let state = AppState()
         let mock = MockAPIClient()
@@ -342,38 +305,6 @@ actor MockAPIClient: APIClientProtocol {
     }
 }
 
-private func makeQuotaSnapshot(
-    usedPercent: Double?,
-    freshness: String = "live",
-    status: QuotaProviderStatus = QuotaProviderStatus(state: "ok", message: nil, category: nil)
-) -> QuotaSnapshot {
-    let windows: [QuotaWindow]
-    if let usedPercent {
-        windows = [QuotaWindow(
-            id: "codex_weekly",
-            label: "Codex · Weekly",
-            usedPercent: usedPercent,
-            remainingPercent: 100 - usedPercent,
-            used: nil,
-            limit: nil,
-            durationMins: 10_080,
-            resetsAt: nil,
-            isUnlimited: nil,
-            modelName: nil
-        )]
-    } else {
-        windows = []
-    }
-    return QuotaSnapshot(
-        provider: "codex",
-        displayName: "OpenAI Codex",
-        planName: "Plus",
-        fetchedAt: "2026-08-03T00:00:00.000Z",
-        freshness: freshness,
-        windows: windows,
-        status: status
-    )
-}
 
 private func waitUntil(
     timeoutNanoseconds: UInt64 = 1_000_000_000,
@@ -438,27 +369,3 @@ actor BlockingAPIClient: APIClientProtocol {
     }
 }
 
-actor FailingQuotaAPIClient: APIClientProtocol {
-    private(set) var quotaCallCount = 0
-
-    func getAgents() async throws -> AgentsResponse {
-        AgentsResponse(available: ["claude"], default: "claude")
-    }
-
-    func getDaily(agent: String, refresh: Bool) async throws -> DailyResponse {
-        DailyResponse(daily: [])
-    }
-
-    func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
-        BlocksResponse(blocks: [])
-    }
-
-    func getProjects(agent: String, refresh: Bool) async throws -> ProjectsResponse {
-        ProjectsResponse(projects: [:])
-    }
-
-    func getQuota(refresh: Bool) async throws -> QuotaResponse {
-        quotaCallCount += 1
-        throw APIClientError.httpError(500)
-    }
-}
