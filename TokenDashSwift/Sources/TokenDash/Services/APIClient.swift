@@ -1,11 +1,16 @@
 import Foundation
 
+/// Bucket granularity for the daemon blocks API.
+enum BlocksGranularity: String {
+    case hour, fifteenMin = "15m", fiveMin = "5m", oneMin = "1m"
+}
+
 /// Test seam — BadgeUpdater depends on this protocol so unit tests can inject
 /// a counting mock instead of the real HTTP client.
 protocol APIClientProtocol {
     func getAgents() async throws -> AgentsResponse
     func getDaily(agent: String, refresh: Bool) async throws -> DailyResponse
-    func getBlocks(agent: String, refresh: Bool) async throws -> BlocksResponse
+    func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity) async throws -> BlocksResponse
     func getProjects(agent: String, refresh: Bool) async throws -> ProjectsResponse
     func getQuota(refresh: Bool) async throws -> QuotaResponse
 }
@@ -35,8 +40,8 @@ actor APIClient: APIClientProtocol {
         try await fetch("/daily?agent=\(agent)\(refreshQuery(refresh))")
     }
 
-    func getBlocks(agent: String, refresh: Bool = false) async throws -> BlocksResponse {
-        try await fetch("/blocks?agent=\(agent)\(refreshQuery(refresh))")
+    func getBlocks(agent: String, refresh: Bool = false, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
+        try await fetch("/blocks?agent=\(agent)&granularity=\(granularity.rawValue)\(refreshQuery(refresh))")
     }
 
     func getProjects(agent: String, refresh: Bool = false) async throws -> ProjectsResponse {

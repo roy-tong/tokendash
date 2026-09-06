@@ -34,11 +34,53 @@ import SwiftUI
         }
     }
 
+    /// Popover activity-chart time range.
+    enum HourlyRange: String, CaseIterable, Identifiable {
+        case oneDay, threeHours, fifteenMinutes
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .oneDay: return "Today"
+            case .threeHours: return "Last 3 Hours"
+            case .fifteenMinutes: return "Last 15 Minutes"
+            }
+        }
+        /// Compact tab label for the chart header.
+        var shortLabel: String {
+            switch self {
+            case .oneDay: return "1D"
+            case .threeHours: return "3H"
+            case .fifteenMinutes: return "15M"
+            }
+        }
+        var bucketMinutes: Int {
+            switch self {
+            case .oneDay: return 60
+            case .threeHours: return 15
+            case .fifteenMinutes: return 1
+            }
+        }
+
+        /// Maps values persisted by pre-1.9.0 builds onto the new cases so
+        /// upgraded users keep a sensible default (the old 1H tab became the
+        /// realtime 15M tab).
+        static func migrate(_ rawValue: String) -> HourlyRange? {
+            switch rawValue {
+            case "today": return .oneDay
+            case "oneHour": return .fifteenMinutes
+            default: return HourlyRange(rawValue: rawValue)
+            }
+        }
+    }
+
     var refreshInterval: RefreshInterval {
         didSet { defaults.set(refreshInterval.rawValue, forKey: Keys.refreshInterval) }
     }
     var appearance: Appearance {
         didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
+    }
+    var hourlyRange: HourlyRange {
+        didSet { defaults.set(hourlyRange.rawValue, forKey: Keys.hourlyRange) }
     }
     var lowQuotaNotificationsEnabled: Bool {
         didSet { defaults.set(lowQuotaNotificationsEnabled, forKey: Keys.lowQuotaNotif) }
@@ -58,6 +100,7 @@ import SwiftUI
         static let lowQuotaNotif = "settings.lowQuotaNotifications"
         static let lowQuotaThreshold = "settings.lowQuotaThreshold"
         static let autoCheckUpdates = "settings.autoCheckUpdates"
+        static let hourlyRange = "settings.hourlyRange"
     }
 
     private init() {
@@ -71,6 +114,7 @@ import SwiftUI
         }
         let appRaw = d.string(forKey: Keys.appearance) ?? Appearance.system.rawValue
         self.appearance = Appearance(rawValue: appRaw) ?? .system
+        self.hourlyRange = HourlyRange.migrate(d.string(forKey: Keys.hourlyRange) ?? "") ?? .oneDay
         self.lowQuotaNotificationsEnabled = d.object(forKey: Keys.lowQuotaNotif) as? Bool ?? true
         self.lowQuotaThreshold = d.object(forKey: Keys.lowQuotaThreshold) as? Int ?? 80
         self.autoCheckUpdates = d.object(forKey: Keys.autoCheckUpdates) as? Bool ?? true

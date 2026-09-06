@@ -1,5 +1,6 @@
 import { parentPort } from 'node:worker_threads';
 import type { AggregateOptions } from './codexParser.js';
+import { type BlockGranularity } from './claudeJsonlParser.js';
 
 type CodexParserModule = typeof import('./codexParser.js');
 
@@ -9,6 +10,7 @@ interface SerializedAggregateOptions {
   since?: string | null;
   until?: string | null;
   timezone?: string;
+  granularity?: BlockGranularity;
 }
 
 type WorkerRequest =
@@ -17,7 +19,7 @@ type WorkerRequest =
   | { id: number; kind: 'projects'; options?: SerializedAggregateOptions }
   | { id: number; kind: 'blocks'; options?: SerializedAggregateOptions };
 
-function deserializeOptions(options?: SerializedAggregateOptions): Partial<AggregateOptions> | undefined {
+function deserializeOptions(options?: SerializedAggregateOptions): Partial<AggregateOptions> & { granularity?: BlockGranularity } | undefined {
   if (!options) return undefined;
   return {
     groupBy: options.groupBy,
@@ -25,6 +27,7 @@ function deserializeOptions(options?: SerializedAggregateOptions): Partial<Aggre
     since: options.since == null ? options.since : new Date(options.since),
     until: options.until == null ? options.until : new Date(options.until),
     timezone: options.timezone,
+    granularity: options.granularity,
   };
 }
 

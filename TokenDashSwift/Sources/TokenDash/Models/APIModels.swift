@@ -148,11 +148,12 @@ struct TodaySummary {
     let cacheRate: Double
 }
 
-struct HourBucket: Identifiable {
-    let hour: Int
+struct TimeBucket: Identifiable {
+    let start: Date     // bucket start (local-timezone semantics, aligned with the daemon's Asia/Shanghai aggregation)
+    let minutes: Int    // bucket duration (60 / 15 / 5)
     let tokens: Int
     let isPeak: Bool
-    var id: Int { hour }
+    var id: Date { start }
 }
 
 /// One five-second observation used by the 30-minute Token Pulse chart.

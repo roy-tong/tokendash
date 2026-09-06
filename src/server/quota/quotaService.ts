@@ -21,6 +21,8 @@ export class QuotaService {
   private readonly fetchTimeoutMs: number;
   /** In-flight promises keyed by provider id, to dedupe concurrent requests. */
   private readonly inflight = new Map<string, Promise<QuotaSnapshot>>();
+  /** Monotonic provider generation so superseded requests cannot overwrite fresh cache data. */
+  private readonly fetchGeneration = new Map<QuotaProviderId, number>();
 
   constructor(
     private readonly registry: QuotaAdapterRegistry,
@@ -58,8 +60,7 @@ export class QuotaService {
     // 2. Dedupe concurrent requests for the same provider
     let p = this.inflight.get(provider);
     if (!p) {
-      p = this.fetchWithTimeout(adapter).finally(() => this.inflight.delete(provider));
-      this.inflight.set(provider, p);
+      p = this.startFetch(adapter, this.fetchGeneration.get(provider) ?? 0);
     }
     return p;
   }
@@ -82,12 +83,24 @@ export class QuotaService {
 
   /** Force a refresh of all configured providers, bypassing the cache. */
   async refreshAll(): Promise<QuotaResponse> {
-    // Cache-clear only the freshness gate; stale data is still retained by fetchOne on failure.
-    this.configuredCache?.forEach(() => {});
-    for (const adapter of this.registry.list()) {
-      this.cache.clear(adapter.provider);
+    const ids = this.configuredCache ?? (await this.discover());
+    const snapshots = await Promise.all(ids.map((provider) => {
+      const adapter = this.registry.get(provider);
+      if (!adapter) return Promise.resolve(null);
+      const generation = (this.fetchGeneration.get(provider) ?? 0) + 1;
+      this.fetchGeneration.set(provider, generation);
+      this.cache.clear(provider);
+      return this.startFetch(adapter, generation);
+    }));
+    const byId = new Map<QuotaProviderId, QuotaSnapshot>();
+    for (const snapshot of snapshots) {
+      if (snapshot) byId.set(snapshot.provider, snapshot);
     }
-    return this.fetchAll();
+    return {
+      providers: this.registry.list()
+        .map((adapter) => byId.get(adapter.provider))
+        .filter((snapshot): snapshot is QuotaSnapshot => !!snapshot),
+    };
   }
 
   /**
@@ -121,7 +134,18 @@ export class QuotaService {
     }
   }
 
-  private async fetchWithTimeout(adapter: QuotaAdapter): Promise<QuotaSnapshot> {
+  private startFetch(adapter: QuotaAdapter, generation: number): Promise<QuotaSnapshot> {
+    let promise: Promise<QuotaSnapshot>;
+    promise = this.fetchWithTimeout(adapter, generation).finally(() => {
+      if (this.inflight.get(adapter.provider) === promise) {
+        this.inflight.delete(adapter.provider);
+      }
+    });
+    this.inflight.set(adapter.provider, promise);
+    return promise;
+  }
+
+  private async fetchWithTimeout(adapter: QuotaAdapter, generation: number): Promise<QuotaSnapshot> {
     try {
       const snapshot = await withTimeout(
         adapter.fetch(),
@@ -129,7 +153,9 @@ export class QuotaService {
         adapter.provider,
       );
       const validated = validateQuotaSnapshot(snapshot);
-      this.cache.set(validated);
+      if ((this.fetchGeneration.get(adapter.provider) ?? 0) === generation) {
+        this.cache.set(validated);
+      }
       return validated;
     } catch (err) {
       return this.handleFailure(adapter, err);

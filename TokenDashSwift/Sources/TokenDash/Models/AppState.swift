@@ -23,7 +23,10 @@ import Combine
     var lastUpdatedAt: Date?
     var cacheRate: Double = 0
     var todaySummary: TodaySummary?
-    var hourlyData: [HourBucket] = []
+    var hourlyData: [TimeBucket] = []
+    /// 1-minute buckets for the realtime 15M tab, refreshed once a minute
+    /// while the popover is open. Separate from the 5-minute history base.
+    var realtimeBuckets: [TimeBucket] = []
     var pulseSamples: [TokenPulseSample] = TokenPulseHistoryStore.shared.load()
     var projects: [ProjectRow] = []
     var models: [ModelRow] = []

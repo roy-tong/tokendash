@@ -241,7 +241,8 @@ esac
     // Detail endpoints take a `forceRefresh` flag, but automatic refreshes stay
     // cache-aware. Only refreshNow() is allowed to bypass usage and quota caches.
     expect(badgeUpdater).toContain('api.getDaily(agent: agent, refresh: forceRefresh)');
-    expect(badgeUpdater).toContain('api.getBlocks(agent: agent, refresh: forceRefresh)');
+    // v1.9.0: blocks fetch the one 5-minute base every range derives from.
+    expect(badgeUpdater).toContain('api.getBlocks(agent: agent, refresh: forceRefresh, granularity: .fiveMin)');
     expect(badgeUpdater).toContain('api.getProjects(agent: agent, refresh: forceRefresh)');
     expect(badgeUpdater).toContain('api.getQuota(refresh: force)');
     expect(badgeUpdater).toContain('refreshNow()');

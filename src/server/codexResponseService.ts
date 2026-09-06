@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import type { DailyResponse, ProjectsResponse, BlocksResponse } from '../shared/types.js';
 import { getBlocksResponse, getCodexResponses, getDailyResponse, getProjectsResponse, type AggregateOptions } from './codexParser.js';
+import { type BlockGranularity } from './claudeJsonlParser.js';
 
 interface CodexResponseBundle {
   daily: DailyResponse;
@@ -25,6 +26,7 @@ interface SerializedAggregateOptions {
   since?: string | null;
   until?: string | null;
   timezone?: string;
+  granularity?: BlockGranularity;
 }
 
 interface WorkerSuccess<K extends CodexResponseKind> {
@@ -46,7 +48,7 @@ let nextRequestId = 1;
 const inFlight = new Map<string, Promise<unknown>>();
 const resultCache = new Map<string, { data: unknown; expiresAt: number }>();
 
-function serializeOptions(options?: Partial<AggregateOptions>): SerializedAggregateOptions | undefined {
+function serializeOptions(options?: Partial<AggregateOptions> & { granularity?: BlockGranularity }): SerializedAggregateOptions | undefined {
   if (!options) return undefined;
   return {
     groupBy: options.groupBy,
@@ -54,10 +56,13 @@ function serializeOptions(options?: Partial<AggregateOptions>): SerializedAggreg
     since: options.since ? options.since.toISOString() : options.since,
     until: options.until ? options.until.toISOString() : options.until,
     timezone: options.timezone,
+    granularity: options.granularity,
   };
 }
 
-function requestKey(kind: CodexResponseKind, options?: Partial<AggregateOptions>): string {
+type CodexServiceOptions = Partial<AggregateOptions> & { granularity?: BlockGranularity };
+
+function requestKey(kind: CodexResponseKind, options?: CodexServiceOptions): string {
   return `${kind}:${JSON.stringify(serializeOptions(options) ?? {})}`;
 }
 
@@ -94,7 +99,7 @@ function workerExecArgv(workerPath: string): string[] {
   return [...process.execArgv, '--import', 'tsx'];
 }
 
-function runSync<K extends CodexResponseKind>(kind: K, options?: Partial<AggregateOptions>): CodexResponseByKind<K> {
+function runSync<K extends CodexResponseKind>(kind: K, options?: CodexServiceOptions): CodexResponseByKind<K> {
   switch (kind) {
     case 'bundle':
       return getCodexResponses(options) as CodexResponseByKind<K>;
@@ -107,7 +112,7 @@ function runSync<K extends CodexResponseKind>(kind: K, options?: Partial<Aggrega
   }
 }
 
-function runInWorker<K extends CodexResponseKind>(kind: K, options?: Partial<AggregateOptions>): Promise<CodexResponseByKind<K>> {
+function runInWorker<K extends CodexResponseKind>(kind: K, options?: CodexServiceOptions): Promise<CodexResponseByKind<K>> {
   const workerPath = resolveCodexWorkerPath();
   if (workerPath.endsWith('.ts')) {
     return Promise.resolve(runSync(kind, options));
@@ -165,7 +170,7 @@ function runInWorker<K extends CodexResponseKind>(kind: K, options?: Partial<Agg
 
 export async function getCodexResponse<K extends CodexResponseKind>(
   kind: K,
-  options?: Partial<AggregateOptions>,
+  options?: CodexServiceOptions,
 ): Promise<CodexResponseByKind<K>> {
   if (process.env.TOKENDASH_DISABLE_CODEX_WORKER === '1') {
     return runSync(kind, options);
@@ -210,7 +215,11 @@ export async function getCodexProjectsResponse(options?: Partial<AggregateOption
   return getCodexResponse('projects', options);
 }
 
-export async function getCodexBlocksResponse(options?: Partial<AggregateOptions>): Promise<BlocksResponse> {
-  if (usesDefaultBundleOptions(options)) return (await getCodexResponse('bundle')).blocks;
+export async function getCodexBlocksResponse(options?: CodexServiceOptions): Promise<BlocksResponse> {
+  // The cached bundle's blocks are always hourly, so fine-grained requests
+  // must compute through the dedicated blocks path instead.
+  if ((options?.granularity ?? 'hour') === 'hour' && usesDefaultBundleOptions(options)) {
+    return (await getCodexResponse('bundle')).blocks;
+  }
   return getCodexResponse('blocks', options);
 }

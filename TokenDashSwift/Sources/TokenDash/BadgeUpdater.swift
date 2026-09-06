@@ -29,6 +29,11 @@ import AppKit
     private let popoverRefreshInterval: TimeInterval
     private let now: () -> Date
 
+    /// Realtime tab cadence (seconds): 1-minute buckets refresh once a minute
+    /// while the popover is open. Cache-served against the daemon's 60s 1m key.
+    private let realtimeInterval: TimeInterval = 60
+    private var realtimeTimer: Timer?
+
     /// Feature flag matching HourlyChartView.pulseEnabled — hides the 10s pulse
     /// sampler for the energy-optimization release.
     private let pulseEnabled = false
@@ -99,6 +104,7 @@ import AppKit
         }
         mode = newMode
         stopDataTimers()
+        updateRealtimeTimer()
         switch newMode {
         case .dormant:
             scheduleDormant()
@@ -150,8 +156,54 @@ import AppKit
         pulseTimer?.invalidate(); pulseTimer = nil
     }
 
+    /// Runs the 1-minute realtime poll only while the popover is open and the
+    /// 15M tab is selected — closed popover, other tabs, and system sleep all
+    /// stop it, keeping the energy profile visibility-driven.
+    private func updateRealtimeTimer() {
+        let shouldRun = mode == .active && SettingsStore.shared.hourlyRange == .fifteenMinutes
+        realtimeTimer?.invalidate()
+        realtimeTimer = nil
+        guard shouldRun else { return }
+        Task { await self.fetchRealtimeBlocks() }   // prime immediately
+        let t = Timer(timeInterval: realtimeInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.fetchRealtimeBlocks() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        realtimeTimer = t
+    }
+
+    /// Called by the chart tabs when the selected range changes so the
+    /// realtime poll starts or stops right away (and refreshes once if live).
+    func realtimeRangeDidChange() {
+        updateRealtimeTimer()
+    }
+
+    /// Fetches only the 1-minute blocks for the realtime tab. Cache-served
+    /// (refresh:false), silent on failure, and never touches detail state —
+    /// daily/projects/quota keep their own cadences.
+    private func fetchRealtimeBlocks() async {
+        guard let api = apiClient else { return }
+        let agents = activeAgents.isEmpty ? ["claude"] : activeAgents
+        var results: [BlocksResponse] = []
+        for agent in agents {
+            if let b = try? await api.getBlocks(agent: agent, refresh: false, granularity: .oneMin) {
+                results.append(b)
+            }
+        }
+        guard !results.isEmpty else { return }
+        let aggregation = UsageBucketAggregator.aggregate(
+            results, now: Date(), bucketMinutes: 1,
+            window: UsageBucketAggregator.realtimeWindow(now: Date()))
+        guard aggregation.granularityMatched else {
+            NSLog("[TokenDash] realtime blocks granularity mismatch — keeping previous data")
+            return
+        }
+        state.realtimeBuckets = aggregation.buckets
+    }
+
     func stop() {
         stopDataTimers()
+        realtimeTimer?.invalidate(); realtimeTimer = nil
         stopBackgroundFull()
     }
 
@@ -187,8 +239,11 @@ import AppKit
             return false
         }
         let currentTime = now()
+        let throttle: TimeInterval = SettingsStore.shared.hourlyRange == .oneDay
+            ? popoverRefreshInterval
+            : min(popoverRefreshInterval, 5 * 60)
         if let lastUpdatedAt = state.lastUpdatedAt,
-           currentTime.timeIntervalSince(lastUpdatedAt) < popoverRefreshInterval {
+           currentTime.timeIntervalSince(lastUpdatedAt) < throttle {
             return false
         }
         await performFullUpdate(
@@ -276,7 +331,8 @@ import AppKit
                 // A forced refresh uses fresh daemon data; launch and cached
                 // detail paths can reuse the daemon's existing results.
                 if let d = try? await api.getDaily(agent: agent, refresh: forceRefresh) { dailyResults.append(d) }
-                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh) { blockResults.append(b) }
+                // One 5-minute base serves every chart range (PRD v1.9.1).
+                if let b = try? await api.getBlocks(agent: agent, refresh: forceRefresh, granularity: .fiveMin) { blockResults.append(b) }
                 if let p = try? await api.getProjects(agent: agent, refresh: forceRefresh) { projectResults.append(p) }
             }
 
@@ -304,14 +360,19 @@ import AppKit
                     totalTokens: totalTokens, inputTokens: totalInput, outputTokens: totalOutput,
                     date: today, at: Date())
             }
-            let computedHourly = computeHourly(blocks: blockResults, today: today)
+            let (computedBuckets, granularityMatched) = computeBuckets(blocks: blockResults)
             let computedProjects = computeProjects(projects: projectResults, today: today)
             // Stale-while-revalidate fallback: if this fetch came back without
             // today data (e.g. daemon warm-up still running), keep the previous
             // view rather than show an empty chart. The next refresh replaces it.
-            let hourly = (computedHourly.allSatisfy { $0.tokens == 0 }
+            // Only retain data of the SAME granularity — an empty fine-grained
+            // rolling window is a legitimate state (quiet hours) and must show
+            // as a zero line, not freeze the previous buckets forever.
+            let sameGranularity = state.hourlyData.first?.minutes == computedBuckets.first?.minutes
+            let hourly = (computedBuckets.allSatisfy { $0.tokens == 0 }
+                          && sameGranularity
                           && state.hourlyData.contains { $0.tokens > 0 })
-                ? state.hourlyData : computedHourly
+                ? state.hourlyData : computedBuckets
             let projectRows = (computedProjects.isEmpty && !state.projects.isEmpty)
                 ? state.projects : computedProjects
             let modelRows = computeModels(daily: dailyResults, today: today)
@@ -326,6 +387,9 @@ import AppKit
             self.state.todaySummary = summary
             self.state.cacheRate = cacheRate
             self.state.errorMessage = nil
+            if !granularityMatched {
+                NSLog("[TokenDash] blocks granularity mismatch — fell back to Today view")
+            }
             self.state.hourlyData = hourly
             self.state.projects = projectRows
             self.state.models = modelRows
@@ -465,22 +529,16 @@ import AppKit
 
     // MARK: - Data computation
 
-    private func computeHourly(blocks: [BlocksResponse], today: String) -> [HourBucket] {
-        var hourly = [Int](repeating: 0, count: 24)
-        for resp in blocks {
-            for block in resp.blocks {
-                let prefix = String(block.startTime.prefix(10))
-                guard prefix == today else { continue }
-                let hourStr = block.startTime.count >= 13 ? String(block.startTime.prefix(13).suffix(2)) : ""
-                if let h = Int(hourStr), h >= 0, h < 24 {
-                    hourly[h] += block.totalTokens
-                }
-            }
+    /// Blocks are always fetched at the finest granularity; every chart range
+    /// derives from this one base locally, so switching tabs needs no refetch.
+    private func computeBuckets(blocks: [BlocksResponse]) -> (buckets: [TimeBucket], matched: Bool) {
+        let result = UsageBucketAggregator.aggregate(blocks, now: Date())
+        guard result.granularityMatched else {
+            // Legacy daemon ignored granularity — keep Today-shaped buckets so
+            // the chart detects them and renders the Today view.
+            return (UsageBucketAggregator.legacyHourBuckets(blocks, now: Date()), false)
         }
-        let maxVal = hourly.max() ?? 0
-        return (0..<24).map { h in
-            HourBucket(hour: h, tokens: hourly[h], isPeak: hourly[h] > 0 && hourly[h] == maxVal)
-        }
+        return (result.buckets, true)
     }
 
     private func computeProjects(projects: [ProjectsResponse], today: String) -> [ProjectRow] {
