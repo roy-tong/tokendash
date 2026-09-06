@@ -21,14 +21,21 @@ enum UsageBucketAggregator {
         let granularityMatched: Bool
     }
 
-    /// Parses daemon blocks into the 5-minute base. The request always asks
-    /// for `granularity=5m`; a legacy daemon silently returns hour blocks,
-    /// which `granularityMatched` detects.
-    static func aggregate(_ responses: [BlocksResponse], now: Date) -> Aggregation {
+    /// Parses daemon blocks into the base at `bucketMinutes` granularity
+    /// (5-minute history base, or 1-minute realtime buckets). The request
+    /// always asks for that granularity; a legacy daemon silently returns
+    /// hour blocks, which `granularityMatched` detects.
+    static func aggregate(
+        _ responses: [BlocksResponse],
+        now: Date,
+        bucketMinutes: Int = 5,
+        window: (start: Date, end: Date)? = nil
+    ) -> Aggregation {
         let calendar = Calendar.current
-        let alignedNow = align(now, to: 5, calendar: calendar)
-        let windowStart = align(
-            alignedNow.addingTimeInterval(-baseWindowHours), to: 5, calendar: calendar)
+        let alignedNow = align(now, to: bucketMinutes, calendar: calendar)
+        let windowStart = window?.start
+            ?? align(alignedNow.addingTimeInterval(-baseWindowHours), to: bucketMinutes, calendar: calendar)
+        let windowEnd = window?.end ?? alignedNow.addingTimeInterval(TimeInterval(bucketMinutes) * 60)
 
         var totals: [Date: Int] = [:]
         var sawSubHourBucket = false
@@ -37,7 +44,7 @@ enum UsageBucketAggregator {
             for block in response.blocks {
                 guard let start = ISO8601LocalFormatter.date(from: block.startTime) else { continue }
                 guard start >= windowStart, start <= alignedNow else { continue }
-                let bucketStart = align(start, to: 5, calendar: calendar)
+                let bucketStart = align(start, to: bucketMinutes, calendar: calendar)
                 totals[bucketStart, default: 0] += block.totalTokens
                 // A start minute that is not hour-aligned proves the daemon
                 // honored the fine-grained request (legacy data is :00 only).
@@ -48,13 +55,21 @@ enum UsageBucketAggregator {
         }
 
         let buckets = skeletonBuckets(
-            from: windowStart, to: alignedNow.addingTimeInterval(300),
-            minutes: 5, totals: totals, calendar: calendar)
+            from: windowStart, to: windowEnd,
+            minutes: bucketMinutes, totals: totals, calendar: calendar)
 
         // An empty window cannot disprove granularity — treat it as matched
         // so the chart renders zero lines instead of falling back.
         let matched = sawSubHourBucket || buckets.allSatisfy { $0.tokens == 0 }
         return Aggregation(buckets: buckets, granularityMatched: matched)
+    }
+
+    /// Window for the realtime tab: the trailing 15 minutes at 1-minute
+    /// granularity, ending on the in-progress minute.
+    static func realtimeWindow(now: Date) -> (start: Date, end: Date) {
+        let calendar = Calendar.current
+        let end = align(now, to: 1, calendar: calendar).addingTimeInterval(60)
+        return (start: end.addingTimeInterval(-16 * 60), end: end)
     }
 
     /// Today buckets built from hour-aligned legacy blocks (pre-1.9.0 daemon).
@@ -79,7 +94,7 @@ enum UsageBucketAggregator {
     /// Derives the buckets for any chart range from the shared 5-minute base.
     /// Always returns the full window skeleton (zero buckets included); the
     /// Today view additionally filters to elapsed hours at render time.
-    /// 60-minute input (legacy fallback) only supports `.today`.
+    /// 60-minute input (legacy fallback) only supports `.oneDay`.
     static func reaggregate(
         _ base: [TimeBucket],
         to range: SettingsStore.HourlyRange,
@@ -91,15 +106,15 @@ enum UsageBucketAggregator {
         let windowStart: Date
         let windowEnd: Date
         switch range {
-        case .today:
+        case .oneDay:
             windowStart = calendar.startOfDay(for: now)
             windowEnd = windowStart.addingTimeInterval(24 * 3600)
-        case .threeHours, .oneHour:
+        case .threeHours, .fifteenMinutes:
             // Complete coverage: the first bucket fully contains now−window,
             // the last bucket is the in-progress one containing now. That is
-            // 13 buckets for a 12×granularity-wide window — one extra beats
+            // one bucket more than a window-width fit — one extra beats
             // dropping the oldest bucket's usage on the floor.
-            let windowSeconds: TimeInterval = range == .threeHours ? 3 * 3600 : 3600
+            let windowSeconds: TimeInterval = range == .threeHours ? 3 * 3600 : 15 * 60
             windowStart = align(now.addingTimeInterval(-windowSeconds), to: bucketMinutes, calendar: calendar)
             windowEnd = align(now, to: bucketMinutes, calendar: calendar)
                 .addingTimeInterval(TimeInterval(bucketMinutes) * 60)

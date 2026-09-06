@@ -197,6 +197,44 @@ final class BadgeUpdaterModeTests: XCTestCase {
         XCTAssertNil(SettingsStore.RefreshInterval(rawValue: 30), "legacy badge cadence should fall back to the one-hour default")
     }
 
+    // MARK: - realtime (15M) tab
+
+    func testRealtimeRangeChangePrimesOneMinuteFetchWhenActive() async throws {
+        let state = AppState()
+        let mock = MockAPIClient()
+        let updater = BadgeUpdater(state: state, client: mock)
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        updater.setMode(.active)
+        // Let the popover-open detail refresh finish first so its .fiveMin
+        // blocks call cannot race the realtime assertion below.
+        try await waitUntil { !state.isRefreshing && state.lastUpdatedAt != nil }
+
+        SettingsStore.shared.hourlyRange = .fifteenMinutes
+        updater.realtimeRangeDidChange()
+        try await waitUntil { state.realtimeBuckets.first?.minutes == 1 }
+
+        let lastBlocksRefresh = await mock.lastBlocksRefresh
+        XCTAssertEqual(lastBlocksRefresh, false, "realtime 轮询走缓存（refresh=false）")
+    }
+
+    func testRealtimeFetchStaysOffOutsidePopover() async throws {
+        let state = AppState()
+        let mock = MockAPIClient()
+        let updater = BadgeUpdater(state: state, client: mock)
+        let original = SettingsStore.shared.hourlyRange
+        defer { SettingsStore.shared.hourlyRange = original }
+
+        SettingsStore.shared.hourlyRange = .fifteenMinutes
+        updater.setMode(.dormant)   // popover closed
+        updater.realtimeRangeDidChange()
+        try await Task.sleep(nanoseconds: 200_000_000)  // 0.2s
+
+        let counts = await mock.snapshot()
+        XCTAssertEqual(counts.blocks, 0, "popover 关闭时不得轮询 realtime 数据")
+    }
+
     // MARK: - stale-while-revalidate vs empty fine-grained windows
 
     func testEmptyFiveMinuteBaseDoesNotFreezePreviousTodayBuckets() async throws {
@@ -225,7 +263,7 @@ final class BadgeUpdaterModeTests: XCTestCase {
         let original = SettingsStore.shared.hourlyRange
         defer { SettingsStore.shared.hourlyRange = original }
 
-        for range in [SettingsStore.HourlyRange.today, .threeHours, .oneHour] {
+        for range in [SettingsStore.HourlyRange.oneDay, .threeHours, .fifteenMinutes] {
             SettingsStore.shared.hourlyRange = range
             await updater.performFullUpdate(forceRefresh: false, forceQuota: false)
             let granularity = await mock.lastBlocksGranularity
@@ -247,9 +285,9 @@ final class BadgeUpdaterModeTests: XCTestCase {
         let countsAfterFirst = await mock.snapshot().daily
 
         now.addTimeInterval(6 * 60)   // 6min：30min 节流内、5min 节流外
-        SettingsStore.shared.hourlyRange = .oneHour
+        SettingsStore.shared.hourlyRange = .fifteenMinutes
         let refreshed = await updater.refreshOnPopoverOpenIfNeeded()
-        XCTAssertTrue(refreshed, "1H 档位下 popover 打开的节流必须收紧到 5min")
+        XCTAssertTrue(refreshed, "15M 档位下 popover 打开的节流必须收紧到 5min")
         let countsAfterOpen = await mock.snapshot().daily
         XCTAssertGreaterThan(countsAfterOpen, countsAfterFirst)
     }
@@ -289,9 +327,11 @@ actor MockAPIClient: APIClientProtocol {
         lastDailyRefresh = refresh
         return DailyResponse(daily: [])
     }
+    private(set) var lastBlocksRefresh: Bool? = nil
     func getBlocks(agent: String, refresh: Bool, granularity: BlocksGranularity = .hour) async throws -> BlocksResponse {
         blocks += 1
         lastBlocksGranularity = granularity
+        lastBlocksRefresh = refresh
         return BlocksResponse(blocks: [])
     }
     func getProjects(agent: String, refresh: Bool) async throws -> ProjectsResponse {

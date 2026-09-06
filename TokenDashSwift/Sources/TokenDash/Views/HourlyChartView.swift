@@ -28,8 +28,13 @@ struct HourlyChartView: View {
     /// range, but a legacy daemon (pre-1.9.0) leaves 60-minute buckets in the
     /// store — those only support Today, so fine-grained tabs fall back to it.
     private var effectiveRange: SettingsStore.HourlyRange {
-        if range != .today, data.first?.minutes == 60 {
-            return .today
+        if range == .fifteenMinutes {
+            // The realtime tab needs live 1-minute buckets; without them
+            // (legacy daemon, fetch failure) it falls back to the 1D view.
+            return state.realtimeBuckets.first?.minutes == 1 ? .fifteenMinutes : .oneDay
+        }
+        if range != .oneDay, data.first?.minutes == 60 {
+            return .oneDay
         }
         return range
     }
@@ -40,13 +45,16 @@ struct HourlyChartView: View {
     /// 5-minute base (no refetch on tab switch). Today shows elapsed hours
     /// only; fine-grained tabs show the full rolling window.
     private var displayBuckets: [TimeBucket] {
+        if effectiveRange == .fifteenMinutes {
+            return state.realtimeBuckets
+        }
         if data.first?.minutes == 60 {
             // Legacy fallback already holds Today-shaped hour buckets.
             let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
             return data.filter { $0.start <= currentHourStart }
         }
         var buckets = UsageBucketAggregator.reaggregate(data, to: effectiveRange, now: now)
-        if effectiveRange == .today {
+        if effectiveRange == .oneDay {
             let currentHourStart = calendar.dateInterval(of: .hour, for: now)?.start ?? now
             buckets = buckets.filter { $0.start <= currentHourStart }
         }
@@ -69,13 +77,13 @@ struct HourlyChartView: View {
 
     private var xDomain: (min: Date, max: Date) {
         switch effectiveRange {
-        case .today:
+        case .oneDay:
             let start = calendar.startOfDay(for: now)
             return (start, start.addingTimeInterval(24 * 3600))
-        case .threeHours, .oneHour:
+        case .threeHours, .fifteenMinutes:
             // Mirrors UsageBucketAggregator.reaggregate: complete coverage from
             // the bucket containing now−window through the in-progress bucket.
-            let window: TimeInterval = effectiveRange == .threeHours ? 3 * 3600 : 3600
+            let window: TimeInterval = effectiveRange == .threeHours ? 3 * 3600 : 15 * 60
             let minutes = effectiveRange.bucketMinutes
             let windowStart = UsageBucketAggregator.align(now.addingTimeInterval(-window), to: minutes, calendar: calendar)
             let windowEnd = UsageBucketAggregator.align(now, to: minutes, calendar: calendar)
@@ -91,7 +99,7 @@ struct HourlyChartView: View {
             header
                 .padding(.bottom, 10)
 
-            if effectiveRange == .today && data.allSatisfy({ $0.tokens == 0 }) {
+            if effectiveRange == .oneDay && data.allSatisfy({ $0.tokens == 0 }) {
                 emptyChart
             } else {
                 chartArea
@@ -125,6 +133,7 @@ struct HourlyChartView: View {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                         settings.hourlyRange = range
                     }
+                    state.badgeUpdater?.realtimeRangeDidChange()
                     Task { @MainActor in
                         _ = await state.badgeUpdater?.refreshOnPopoverOpenIfNeeded()
                     }
@@ -274,7 +283,7 @@ struct HourlyChartView: View {
     /// edges, so their outer half gets clipped ("22:4.."). Nudge edge labels
     /// inward by half a label width; middle labels stay centered on their tick.
     private func edgeLabelOffset(for date: Date) -> CGFloat {
-        guard effectiveRange != .today else { return 0 }
+        guard effectiveRange != .oneDay else { return 0 }
         if date == xAxisValues.last { return -13 }
         if date == xAxisValues.first { return 13 }
         return 0
@@ -282,13 +291,13 @@ struct HourlyChartView: View {
 
     private var xAxisValues: [Date] {
         switch effectiveRange {
-        case .today:
+        case .oneDay:
             let start = calendar.startOfDay(for: now)
             return [0, 3, 6, 9, 12, 15, 18, 21].compactMap {
                 calendar.date(byAdding: .hour, value: $0, to: start)
             }
-        case .threeHours, .oneHour:
-            let step: TimeInterval = effectiveRange == .threeHours ? 60 * 60 : 15 * 60
+        case .threeHours, .fifteenMinutes:
+            let step: TimeInterval = effectiveRange == .threeHours ? 60 * 60 : 5 * 60
             var values: [Date] = []
             var cursor = xDomain.min
             while cursor <= xDomain.max {
@@ -380,7 +389,7 @@ struct HourlyChartView: View {
     }()
 
     private var axisFormatter: DateFormatter {
-        effectiveRange == .today ? Self.hourAxisFormatter : Self.minuteFormatter
+        effectiveRange == .oneDay ? Self.hourAxisFormatter : Self.minuteFormatter
     }
 
     // MARK: - Empty state

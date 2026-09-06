@@ -2,7 +2,7 @@ import Foundation
 
 /// Bucket granularity for the daemon blocks API.
 enum BlocksGranularity: String {
-    case hour, fifteenMin = "15m", fiveMin = "5m"
+    case hour, fifteenMin = "15m", fiveMin = "5m", oneMin = "1m"
 }
 
 /// Test seam — BadgeUpdater depends on this protocol so unit tests can inject

@@ -34,30 +34,41 @@ import SwiftUI
         }
     }
 
-    /// Popover hourly chart time range.
+    /// Popover activity-chart time range.
     enum HourlyRange: String, CaseIterable, Identifiable {
-        case today, threeHours, oneHour
+        case oneDay, threeHours, fifteenMinutes
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .today: return "Today"
+            case .oneDay: return "Today"
             case .threeHours: return "Last 3 Hours"
-            case .oneHour: return "Last Hour"
+            case .fifteenMinutes: return "Last 15 Minutes"
             }
         }
         /// Compact tab label for the chart header.
         var shortLabel: String {
             switch self {
-            case .today: return "Today"
+            case .oneDay: return "1D"
             case .threeHours: return "3H"
-            case .oneHour: return "1H"
+            case .fifteenMinutes: return "15M"
             }
         }
         var bucketMinutes: Int {
             switch self {
-            case .today: return 60
+            case .oneDay: return 60
             case .threeHours: return 15
-            case .oneHour: return 5
+            case .fifteenMinutes: return 1
+            }
+        }
+
+        /// Maps values persisted by pre-1.9.0 builds onto the new cases so
+        /// upgraded users keep a sensible default (the old 1H tab became the
+        /// realtime 15M tab).
+        static func migrate(_ rawValue: String) -> HourlyRange? {
+            switch rawValue {
+            case "today": return .oneDay
+            case "oneHour": return .fifteenMinutes
+            default: return HourlyRange(rawValue: rawValue)
             }
         }
     }
@@ -103,7 +114,7 @@ import SwiftUI
         }
         let appRaw = d.string(forKey: Keys.appearance) ?? Appearance.system.rawValue
         self.appearance = Appearance(rawValue: appRaw) ?? .system
-        self.hourlyRange = HourlyRange(rawValue: d.string(forKey: Keys.hourlyRange) ?? "") ?? .today
+        self.hourlyRange = HourlyRange.migrate(d.string(forKey: Keys.hourlyRange) ?? "") ?? .oneDay
         self.lowQuotaNotificationsEnabled = d.object(forKey: Keys.lowQuotaNotif) as? Bool ?? true
         self.lowQuotaThreshold = d.object(forKey: Keys.lowQuotaThreshold) as? Int ?? 80
         self.autoCheckUpdates = d.object(forKey: Keys.autoCheckUpdates) as? Bool ?? true

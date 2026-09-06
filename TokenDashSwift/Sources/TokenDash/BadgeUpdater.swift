@@ -29,6 +29,11 @@ import AppKit
     private let popoverRefreshInterval: TimeInterval
     private let now: () -> Date
 
+    /// Realtime tab cadence (seconds): 1-minute buckets refresh once a minute
+    /// while the popover is open. Cache-served against the daemon's 60s 1m key.
+    private let realtimeInterval: TimeInterval = 60
+    private var realtimeTimer: Timer?
+
     /// Feature flag matching HourlyChartView.pulseEnabled — hides the 10s pulse
     /// sampler for the energy-optimization release.
     private let pulseEnabled = false
@@ -99,6 +104,7 @@ import AppKit
         }
         mode = newMode
         stopDataTimers()
+        updateRealtimeTimer()
         switch newMode {
         case .dormant:
             scheduleDormant()
@@ -150,8 +156,54 @@ import AppKit
         pulseTimer?.invalidate(); pulseTimer = nil
     }
 
+    /// Runs the 1-minute realtime poll only while the popover is open and the
+    /// 15M tab is selected — closed popover, other tabs, and system sleep all
+    /// stop it, keeping the energy profile visibility-driven.
+    private func updateRealtimeTimer() {
+        let shouldRun = mode == .active && SettingsStore.shared.hourlyRange == .fifteenMinutes
+        realtimeTimer?.invalidate()
+        realtimeTimer = nil
+        guard shouldRun else { return }
+        Task { await self.fetchRealtimeBlocks() }   // prime immediately
+        let t = Timer(timeInterval: realtimeInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.fetchRealtimeBlocks() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        realtimeTimer = t
+    }
+
+    /// Called by the chart tabs when the selected range changes so the
+    /// realtime poll starts or stops right away (and refreshes once if live).
+    func realtimeRangeDidChange() {
+        updateRealtimeTimer()
+    }
+
+    /// Fetches only the 1-minute blocks for the realtime tab. Cache-served
+    /// (refresh:false), silent on failure, and never touches detail state —
+    /// daily/projects/quota keep their own cadences.
+    private func fetchRealtimeBlocks() async {
+        guard let api = apiClient else { return }
+        let agents = activeAgents.isEmpty ? ["claude"] : activeAgents
+        var results: [BlocksResponse] = []
+        for agent in agents {
+            if let b = try? await api.getBlocks(agent: agent, refresh: false, granularity: .oneMin) {
+                results.append(b)
+            }
+        }
+        guard !results.isEmpty else { return }
+        let aggregation = UsageBucketAggregator.aggregate(
+            results, now: Date(), bucketMinutes: 1,
+            window: UsageBucketAggregator.realtimeWindow(now: Date()))
+        guard aggregation.granularityMatched else {
+            NSLog("[TokenDash] realtime blocks granularity mismatch — keeping previous data")
+            return
+        }
+        state.realtimeBuckets = aggregation.buckets
+    }
+
     func stop() {
         stopDataTimers()
+        realtimeTimer?.invalidate(); realtimeTimer = nil
         stopBackgroundFull()
     }
 
@@ -187,7 +239,7 @@ import AppKit
             return false
         }
         let currentTime = now()
-        let throttle: TimeInterval = SettingsStore.shared.hourlyRange == .today
+        let throttle: TimeInterval = SettingsStore.shared.hourlyRange == .oneDay
             ? popoverRefreshInterval
             : min(popoverRefreshInterval, 5 * 60)
         if let lastUpdatedAt = state.lastUpdatedAt,
